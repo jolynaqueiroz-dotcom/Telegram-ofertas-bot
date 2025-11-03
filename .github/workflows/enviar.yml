@@ -1,0 +1,31 @@
+name: Enviar ofertas Shopee Telegram
+
+on:
+  schedule:
+    - cron: "0 12 * * *"   # 09h (Brasília)
+    - cron: "0 16 * * *"   # 13h
+    - cron: "0 19 * * *"   # 16h
+    - cron: "0 23 * * *"   # 20h
+  workflow_dispatch:        # permite rodar manualmente
+
+jobs:
+  enviar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Executar script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHOPEE_KEYWORDS: ${{ secrets.SHOPEE_KEYWORDS }}
+        run: python telegram_bot.py
