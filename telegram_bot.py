@@ -131,6 +131,7 @@ def main():
     except Exception as e:
         print("Erro ao gravar new_offers.json:", e)
 
-
+# Teste rápido: enviar mensagem para o grupo
+send_message(CHAT_ID, "✅ Teste do bot funcionando!")
 if __name__ == "__main__":
     main()
