@@ -126,7 +126,7 @@ def main():
         "title": "Oferta Teste 🔥",
         "price": "R$ 99,90",
         "url": "https://shopee.com.br",
-        "image_url": "https://down-br.img.susercontent.com/file/1a2b3c4d5e6f7g8h9i.jpg"
+        "image_url": "https://images.pexels.com/photos/414612/pexels-photo-414612.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
     }
 
     if test_offer["id"] not in sent:
