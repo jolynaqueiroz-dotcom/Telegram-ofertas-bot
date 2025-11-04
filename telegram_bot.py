@@ -105,7 +105,6 @@ def main():
             print("Erro ao enviar para Telegram:", e)
 
     save_sent_ids(new_sent)
-# 🧪 Linha de teste (envia mensagem pro grupo pra confirmar o bot)
-send_message(-1002400084420, "Teste automático ✅")
+
 if __name__ == "__main__":
     main()
