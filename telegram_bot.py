@@ -27,7 +27,7 @@ def load_sent_ids() -> set:
     except Exception:
         return set()
 
-def save_sent_ids(ids: set):
+def save_sent_ids(ids:set):
     try:
         with open(SENT_STORE, "w", encoding="utf-8") as f:
             json.dump(list(ids), f, ensure_ascii=False, indent=2)
@@ -53,7 +53,7 @@ def format_caption(offer: Dict) -> str:
     url = offer.get("url", "")
     return f"<b>{title}</b>\n{price}\n<a href=\"{url}\">Ver oferta</a>"
 
-# -------- Shopee Brasil scraping --------
+# -------- Shopee Brasil scraping com debug --------
 def fetch_from_shopee_br(keywords: List[str]) -> List[Dict]:
     offers = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -62,8 +62,14 @@ def fetch_from_shopee_br(keywords: List[str]) -> List[Dict]:
         try:
             kw_encoded = requests.utils.requote_uri(kw)
             url = f"https://shopee.com.br/api/v4/search/search_items?by=sales&keyword={kw_encoded}&limit=20&order=desc&page_type=search"
-            resp = requests.get(url, headers=headers, timeout=15).json()
+            
+            resp = requests.get(url, headers=headers, timeout=15)
+            print("DEBUG Shopee resposta:", resp.text)  # <--- linha de debug
+            resp = resp.json()
+            
             items = resp.get("items", [])
+            print("DEBUG quantidade de itens encontrados:", len(items))  # <--- linha de debug
+            
             for it in items:
                 data = it.get("item_basic", {})
                 itemid = data.get("itemid")
@@ -90,17 +96,17 @@ def fetch_from_shopee_br(keywords: List[str]) -> List[Dict]:
 
 # -------- Execução principal --------
 def main():
-    sent = load_sent_ids()          # IDs já enviados
-    new_sent = set(sent)            # histórico atualizado
+    sent = load_sent_ids()
+    new_sent = set(sent)
     keywords = [k.strip() for k in SHOPEE_KEYWORDS.split(";") if k.strip()]
     offers = fetch_from_shopee_br(keywords)
 
-    sent_this_run = []  # ofertas enviadas nesta execução
+    # lista para gravar só as ofertas enviadas com sucesso nesta execução
+    sent_this_run = []
 
-    # envia ofertas reais
     for offer in offers:
         oid = offer["id"]
-        if oid in sent:   # ignora se já foi enviado
+        if oid in sent:
             continue
         caption = format_caption(offer)
         try:
@@ -115,7 +121,7 @@ def main():
         except Exception as e:
             print("Erro ao enviar para Telegram:", e)
 
-    save_sent_ids(new_sent)  # atualiza histórico completo
+    save_sent_ids(new_sent)
 
     # grava new_offers.json com as ofertas enviadas nesta execução
     try:
@@ -124,7 +130,6 @@ def main():
         print("Arquivo new_offers.json criado com", len(sent_this_run), "ofertas.")
     except Exception as e:
         print("Erro ao gravar new_offers.json:", e)
-
 
 if __name__ == "__main__":
     main()
