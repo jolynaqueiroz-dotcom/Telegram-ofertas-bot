@@ -120,25 +120,7 @@ def main():
         except Exception as e:
             print("Erro ao enviar para Telegram:", e)
 
-    # --- Oferta de teste temporária ---
-    test_offer = {
-        "id": "teste-123",
-        "title": "Oferta Teste 🔥",
-        "price": "R$ 99,90",
-        "url": "https://shopee.com.br",
-        "image_url": "https://images.pexels.com/photos/414612/pexels-photo-414612.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940"
-    }
-
-    if test_offer["id"] not in sent:
-        caption = format_caption(test_offer)
-        resp = send_photo(CHAT_ID, test_offer["image_url"], caption)
-        if resp.get("ok"):
-            print("✅ Enviado oferta de teste:", test_offer["title"])
-            new_sent.add(test_offer["id"])
-            sent_this_run.append(test_offer)
-        else:
-            print("❌ Falha ao enviar oferta de teste:", resp)
-
+    
     save_sent_ids(new_sent)
 
     # grava new_offers.json com as ofertas enviadas nesta execução
