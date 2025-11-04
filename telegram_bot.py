@@ -27,7 +27,7 @@ def load_sent_ids() -> set:
     except Exception:
         return set()
 
-def save_sent_ids(ids:set):
+def save_sent_ids(ids: set):
     try:
         with open(SENT_STORE, "w", encoding="utf-8") as f:
             json.dump(list(ids), f, ensure_ascii=False, indent=2)
@@ -39,19 +39,13 @@ def send_photo(chat_id: str, photo_url: str, caption: str):
     url = f"{TELEGRAM_API}/sendPhoto"
     data = {"chat_id": chat_id, "photo": photo_url, "caption": caption, "parse_mode": "HTML"}
     r = requests.post(url, data=data, timeout=20)
-    try:
-        return r.json()
-    except Exception:
-        return {"ok": False, "error": "invalid-json-response"}
+    return r.json()
 
 def send_message(chat_id: str, text: str):
     url = f"{TELEGRAM_API}/sendMessage"
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     r = requests.post(url, data=data, timeout=20)
-    try:
-        return r.json()
-    except Exception:
-        return {"ok": False, "error": "invalid-json-response"}
+    return r.json()
 
 def format_caption(offer: Dict) -> str:
     title = offer.get("title", "")
@@ -93,19 +87,20 @@ def fetch_from_shopee_br(keywords: List[str]) -> List[Dict]:
         except Exception as e:
             print("Erro ao buscar produtos:", e)
     return offers
+
 # -------- Execução principal --------
 def main():
-    sent = load_sent_ids()
-    new_sent = set(sent)
+    sent = load_sent_ids()          # IDs já enviados
+    new_sent = set(sent)            # histórico atualizado
     keywords = [k.strip() for k in SHOPEE_KEYWORDS.split(";") if k.strip()]
     offers = fetch_from_shopee_br(keywords)
 
-    # lista para gravar só as ofertas enviadas com sucesso nesta execução
-    sent_this_run = []
+    sent_this_run = []  # ofertas enviadas nesta execução
 
+    # envia ofertas reais
     for offer in offers:
         oid = offer["id"]
-        if oid in sent:
+        if oid in sent:   # ignora se já foi enviado
             continue
         caption = format_caption(offer)
         try:
@@ -120,8 +115,7 @@ def main():
         except Exception as e:
             print("Erro ao enviar para Telegram:", e)
 
-    
-    save_sent_ids(new_sent)
+    save_sent_ids(new_sent)  # atualiza histórico completo
 
     # grava new_offers.json com as ofertas enviadas nesta execução
     try:
