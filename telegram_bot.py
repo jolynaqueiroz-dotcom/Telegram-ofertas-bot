@@ -120,6 +120,23 @@ def main():
             time.sleep(1.5)
         except Exception as e:
             print("Erro ao enviar para Telegram:", e)
+            # --- Oferta de teste temporária ---
+test_offer = {
+    "id": "teste-123",
+    "title": "Oferta Teste 🔥",
+    "price": "R$ 99,90",
+    "url": "https://shopee.com.br",
+    "image_url": "https://down-br.img.susercontent.com/file/1a2b3c4d5e6f7g8h9i.jpg"
+}
+
+if test_offer["id"] not in sent:
+    caption = format_caption(test_offer)
+    resp = send_photo(CHAT_ID, test_offer["image_url"], caption)
+    if resp.get("ok"):
+        print("✅ Enviado oferta de teste:", test_offer["title"])
+        new_sent.add(test_offer["id"])
+    else:
+        print("❌ Falha ao enviar oferta de teste:", resp)
 
     save_sent_ids(new_sent)
 
@@ -131,7 +148,6 @@ def main():
     except Exception as e:
         print("Erro ao gravar new_offers.json:", e)
 
-# Teste rápido: enviar mensagem para o grupo
-send_message(CHAT_ID, "✅ Teste do bot funcionando!")
+
 if __name__ == "__main__":
     main()
