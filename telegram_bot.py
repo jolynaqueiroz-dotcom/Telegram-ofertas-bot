@@ -99,9 +99,31 @@ def main():
     sent = load_sent_ids()
     new_sent = set(sent)
     keywords = [k.strip() for k in SHOPEE_KEYWORDS.split(";") if k.strip()]
-    offers = fetch_from_shopee_br(keywords)
+    
+    # ---------- OFERTA DE TESTE ----------
+    test_offer = {
+        "id": "teste-001",
+        "title": "Oferta de teste ✅",
+        "price": "R$ 0,00",
+        "url": "https://t.me/promoincriveisagora",
+        "image_url": "https://upload.wikimedia.org/wikipedia/commons/4/4f/Iconic_image_placeholder.png"
+    }
+    
+    if test_offer["id"] not in sent:
+        caption = format_caption(test_offer)
+        try:
+            resp = send_photo(CHAT_ID, test_offer["image_url"], caption)
+            if resp.get("ok"):
+                print("✅ Oferta de teste enviada com sucesso!")
+                new_sent.add(test_offer["id"])
+            else:
+                print("❌ Falha ao enviar oferta de teste:", resp)
+        except Exception as e:
+            print("Erro ao enviar oferta de teste:", e)
+    # ---------- FIM OFERTA DE TESTE ----------
 
-    # lista para gravar só as ofertas enviadas com sucesso nesta execução
+    offers = fetch_from_shopee_affiliate(keywords)
+
     sent_this_run = []
 
     for offer in offers:
@@ -130,6 +152,5 @@ def main():
         print("Arquivo new_offers.json criado com", len(sent_this_run), "ofertas.")
     except Exception as e:
         print("Erro ao gravar new_offers.json:", e)
-
 if __name__ == "__main__":
     main()
