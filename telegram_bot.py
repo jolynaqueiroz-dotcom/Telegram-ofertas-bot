@@ -39,13 +39,19 @@ def send_photo(chat_id: str, photo_url: str, caption: str):
     url = f"{TELEGRAM_API}/sendPhoto"
     data = {"chat_id": chat_id, "photo": photo_url, "caption": caption, "parse_mode": "HTML"}
     r = requests.post(url, data=data, timeout=20)
-    return r.json()
+    try:
+        return r.json()
+    except Exception:
+        return {"ok": False, "error": "invalid-json-response"}
 
 def send_message(chat_id: str, text: str):
     url = f"{TELEGRAM_API}/sendMessage"
     data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     r = requests.post(url, data=data, timeout=20)
-    return r.json()
+    try:
+        return r.json()
+    except Exception:
+        return {"ok": False, "error": "invalid-json-response"}
 
 def format_caption(offer: Dict) -> str:
     title = offer.get("title", "")
@@ -60,7 +66,8 @@ def fetch_from_shopee_br(keywords: List[str]) -> List[Dict]:
 
     for kw in keywords:
         try:
-            url = f"https://shopee.com.br/api/v4/search/search_items?by=sales&keyword={kw}&limit=20&order=desc&page_type=search"
+            kw_encoded = requests.utils.requote_uri(kw)
+            url = f"https://shopee.com.br/api/v4/search/search_items?by=sales&keyword={kw_encoded}&limit=20&order=desc&page_type=search"
             resp = requests.get(url, headers=headers, timeout=15).json()
             items = resp.get("items", [])
             for it in items:
@@ -69,7 +76,10 @@ def fetch_from_shopee_br(keywords: List[str]) -> List[Dict]:
                 shopid = data.get("shopid")
                 name = data.get("name", "")
                 image = data.get("image")
-                price = int(data.get("price", 0)) / 100000
+                try:
+                    price = int(data.get("price", 0)) / 100000
+                except Exception:
+                    price = 0
                 url_item = f"https://shopee.com.br/product/{shopid}/{itemid}"
 
                 offers.append({
@@ -91,20 +101,36 @@ def main():
     keywords = [k.strip() for k in SHOPEE_KEYWORDS.split(";") if k.strip()]
     offers = fetch_from_shopee_br(keywords)
 
+    # lista para gravar só as ofertas enviadas com sucesso nesta execução
+    sent_this_run = []
+
     for offer in offers:
         oid = offer["id"]
         if oid in sent:
             continue
         caption = format_caption(offer)
         try:
-            send_photo(CHAT_ID, offer["image_url"], caption)
-            print("✅ Enviado:", offer["title"])
-            new_sent.add(oid)
+            resp = send_photo(CHAT_ID, offer["image_url"], caption)
+            if resp.get("ok"):
+                print("✅ Enviado:", offer["title"])
+                new_sent.add(oid)
+                sent_this_run.append(offer)
+            else:
+                print("❌ Falha ao enviar:", offer["title"], "->", resp)
             time.sleep(1.5)
         except Exception as e:
             print("Erro ao enviar para Telegram:", e)
 
     save_sent_ids(new_sent)
+
+    # grava new_offers.json com as ofertas enviadas nesta execução
+    try:
+        with open("new_offers.json", "w", encoding="utf-8") as f:
+            json.dump(sent_this_run, f, ensure_ascii=False, indent=2)
+        print("Arquivo new_offers.json criado com", len(sent_this_run), "ofertas.")
+    except Exception as e:
+        print("Erro ao gravar new_offers.json:", e)
+
 
 if __name__ == "__main__":
     main()
