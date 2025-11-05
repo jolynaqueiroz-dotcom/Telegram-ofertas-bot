@@ -1,6 +1,6 @@
 # telegram_bot.py
 # Bot automático: busca produtos via Shopee Affiliate (GraphQL) e envia para Telegram
-# Corrigido: remove app_id da query, usa matchId Int64, campos corretos, assinatura SHA256
+# Assinatura SHA256 correta, query compatível com productOfferV2, usa SHOPEE_AFFILIATE_URL (2 F)
 # Autor: ChatGPT (ajuste para Karolyna)
 
 import os
@@ -18,6 +18,7 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID", "").strip()
 SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "").strip()
 SHOPEE_KEYWORDS = os.getenv("SHOPEE_KEYWORDS", "celular").strip()
+# usa o secret com nome correto (com dois F)
 SHOPEE_AFFILIATE_URL = os.getenv("SHOPEE_AFFILIATE_URL", "https://open-api.affiliate.shopee.com.br/graphql").strip()
 SHOPEE_MATCH_ID = os.getenv("SHOPEE_MATCH_ID", "").strip()
 
@@ -74,7 +75,7 @@ def format_caption(offer: Dict) -> str:
     url = offer.get("url", "") or ""
     return f"<b>{title}</b>\n{price}\n<a href=\"{url}\">Ver oferta</a>"
 
-# -------- GraphQL query (productOfferV2) - corrected fields and matchId Int64 --------
+# -------- GraphQL query (productOfferV2) - compatible fields --------
 GRAPHQL_QUERY = """
 query productOfferV2Query($keyword: String, $limit: Int, $listType: Int, $matchId: Int64, $sortType: Int, $page: Int) {
   productOfferV2(keyword: $keyword, limit: $limit, listType: $listType, matchId: $matchId, sortType: $sortType, page: $page) {
@@ -85,7 +86,7 @@ query productOfferV2Query($keyword: String, $limit: Int, $listType: Int, $matchI
       imageUrl
       shopId
       productCatIds
-      # if price object exists it will be handled in parser
+      # price object/fields may exist depending on API response
     }
     pageInfo {
       hasNextPage
@@ -96,7 +97,7 @@ query productOfferV2Query($keyword: String, $limit: Int, $listType: Int, $matchI
 
 # -------- Função para enviar GraphQL assinada (assina e envia o mesmo payload bytes) --------
 def post_graphql_signed(url: str, payload: dict, app_id: str, app_secret: str) -> requests.Response:
-    # compact JSON string (no spaces) — important for signature consistency
+    # compact JSON string (sem espaços) — importante para assinatura consistente
     payload_str = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
     payload_bytes = payload_str.encode("utf-8")
 
@@ -109,7 +110,7 @@ def post_graphql_signed(url: str, payload: dict, app_id: str, app_secret: str) -
         "Authorization": f"SHA256 Credential={app_id}, Timestamp={timestamp}, Signature={signature}"
     }
 
-    # debug
+    # debug (seguros)
     print(f"DEBUG: POST GraphQL to {url}")
     print("DEBUG: timestamp:", timestamp)
     print("DEBUG: payload length (bytes):", len(payload_bytes))
@@ -121,14 +122,12 @@ def post_graphql_signed(url: str, payload: dict, app_id: str, app_secret: str) -
 # -------- Busca via GraphQL (tolerante) --------
 def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
     offers = []
-
     DEFAULT_LIMIT = 20
     DEFAULT_LISTTYPE = 0   # ALL
     DEFAULT_SORT = 2       # ITEM_SOLD_DESC
 
     for kw in keywords:
         try:
-            # NOTE: app_id removed from GraphQL variables (server expects no app_id arg)
             variables = {
                 "keyword": kw,
                 "limit": DEFAULT_LIMIT,
@@ -136,9 +135,8 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
                 "sortType": DEFAULT_SORT,
                 "page": 1
             }
-            # add matchId if provided (must be Int64 type on server)
+            # add matchId if provided (must be Int64 on server)
             if SHOPEE_MATCH_ID and SHOPEE_MATCH_ID.isdigit():
-                # GraphQL expects Int64 — send as integer (Python int is fine)
                 variables["matchId"] = int(SHOPEE_MATCH_ID)
 
             payload = {"query": GRAPHQL_QUERY, "variables": variables}
@@ -158,7 +156,6 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
             # show GraphQL errors if any
             if isinstance(resp, dict) and resp.get("errors"):
                 print("DEBUG GraphQL errors:", resp.get("errors"))
-                # don't raise; try next keyword
                 continue
 
             # extract nodes tolerant to structure variants
@@ -183,9 +180,8 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
 
             for item in nodes:
                 try:
-                    # map common fields with the names the API suggests
                     pid = item.get("itemId") or item.get("productId") or item.get("id") or str(item.get("itemId", ""))
-                    title = item.get("productName") or item.get("name") or item.get("title") or ""
+                    title = item.get("productName") or item.get("product_name") or item.get("name") or ""
                     url_item = item.get("productLink") or item.get("product_link") or item.get("productUrl") or ""
                     img = (
                         item.get("imageUrl") or
@@ -201,7 +197,6 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
                     elif isinstance(item.get("min_price"), (int, float)):
                         price_str = f"R$ {float(item.get('min_price')):.2f}"
                     elif isinstance(item.get("price"), dict):
-                        # try to find a display string inside price object
                         price_str = item["price"].get("price_text") or item["price"].get("price_str") or price_str
 
                     offers.append({
@@ -214,7 +209,6 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
                 except Exception as e:
                     print("DEBUG: falha ao mapear item:", e)
 
-            # small delay per keyword to avoid rate limiting
             time.sleep(0.6)
 
         except Exception as e:
@@ -268,7 +262,6 @@ def main():
 
     save_sent_ids(new_sent)
 
-    # grava new_offers.json com as ofertas enviadas nesta execução
     try:
         with open("new_offers.json", "w", encoding="utf-8") as f:
             json.dump(sent_this_run, f, ensure_ascii=False, indent=2)
