@@ -1,6 +1,4 @@
 name: Enviar ofertas para o Telegram
-- name: Install dependencies
-  run: pip install -r requirements.txt
 on:
   workflow_dispatch:        # permite rodar manualmente pelo GitHub Actions
 
