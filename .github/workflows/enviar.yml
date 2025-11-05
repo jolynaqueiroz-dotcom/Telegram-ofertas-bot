@@ -1,52 +1,12 @@
-name: Enviar ofertas Shopee Telegram
-
-on:
-  schedule:
-    - cron: "0 12 * * *"   # 09h (Brasília)
-    - cron: "0 16 * * *"   # 13h
-    - cron: "0 19 * * *"   # 16h
-    - cron: "0 23 * * *"   # 20h
-  workflow_dispatch:        # permite rodar manualmente
-
-jobs:
-  enviar:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Baixar repositório
-        uses: actions/checkout@v4
-
-      - name: Configurar Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.11
-
-      - name: Instalar dependências
-        run: pip install requests
-
-      - name: Executar script
-        # define as variáveis de ambiente só para este passo
+- name: Executar script
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Shopee - usar os nomes que você já tem
           SHOPEE_KEYWORDS: ${{ secrets.SHOPEE_KEYWORDS }}
-        run: |
-          python telegram_bot.py
-
-      - name: Criar/commitar offers.json (se houver ofertas)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # configura o remote usando token para permitir push
-          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
-          if [ -f new_offers.json ]; then
-            mv new_offers.json offers.json || true
-            git add offers.json
-            git commit -m "Atualiza offers.json (envio automático)" || echo "no changes to commit"
-            git push origin HEAD:${{ github.ref_name }}
-          else
-            echo "new_offers.json não encontrado — nada a commitar."
-          fi
+          SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
+          SHOPEE_APP_SECRET: ${{ secrets.SHOPEE_APP_SECRET }}
+          SHOPEE_AFFILIATE_URL: ${{ secrets.SHOPEE_AFILIATE_URL }}   # note o nome que você criou
+          SHOPEE_API_KEY: ${{ secrets.SHOPEE_API_KEY }}
+          SHOPEE_PARTNER: ${{ secrets.SHOPEE_PARTNER }}
+        run: python telegram_bot.py
