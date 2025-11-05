@@ -1,10 +1,12 @@
 # telegram_bot.py
-# Bot automático que busca produtos via Shopee Affiliate (GraphQL) e envia para um grupo Telegram
+# Bot automático que busca produtos via Shopee Affiliate (GraphQL) e envia para Telegram
+# Inclui assinatura SHA256 no header de Authorization
 # Autor: ChatGPT (ajuste para Karolyna)
 
 import os
 import time
 import json
+import hashlib
 import requests
 from typing import List, Dict
 
@@ -16,7 +18,6 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID")
 SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET")
 SHOPEE_KEYWORDS = os.getenv("SHOPEE_KEYWORDS", "celular")
-# endpoint GraphQL (já descoberto)
 SHOPEE_AFFILIATE_URL = os.getenv("SHOPEE_AFFILIATE_URL", "https://open-api.affiliate.shopee.com.br/graphql")
 SHOPEE_MATCH_ID = os.getenv("SHOPEE_MATCH_ID", "").strip()
 
@@ -103,13 +104,33 @@ query productOfferV2Query($app_id: Int, $keyword: String, $limit: Int, $listType
 }
 """
 
+# -------- Função para enviar GraphQL com assinatura SHA256 exigida pela Shopee --------
+def post_graphql_signed(url: str, payload: dict, app_id: str, app_secret: str) -> requests.Response:
+    """
+    Monta o payload JSON compactado, gera timestamp e assinatura SHA256 e faz POST.
+    Signature = SHA256( AppId + Timestamp + payload_str + AppSecret )
+    Header Authorization: SHA256 Credential={AppId}, Timestamp={Timestamp}, Signature={Signature}
+    """
+    # compact JSON string (sem espaços) — importante para assinatura consistente
+    payload_str = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+    timestamp = str(int(time.time()))
+    to_sign = f"{app_id}{timestamp}{payload_str}{app_secret}"
+    signature = hashlib.sha256(to_sign.encode("utf-8")).hexdigest()
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"SHA256 Credential={app_id}, Timestamp={timestamp}, Signature={signature}"
+    }
+
+    print(f"DEBUG: POST GraphQL to {url}")
+    # print payload size for debug (não imprime dados sensíveis)
+    print("DEBUG: payload length:", len(payload_str))
+    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    return resp
+
 # -------- Busca via GraphQL (tolerante) --------
 def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
     offers = []
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {SHOPEE_APP_SECRET}"
-    }
 
     DEFAULT_LIMIT = 20
     DEFAULT_LISTTYPE = 0   # ALL
@@ -122,18 +143,18 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
                 "keyword": kw,
                 "limit": DEFAULT_LIMIT,
                 "listType": DEFAULT_LISTTYPE,
-                "matchId": int(SHOPEE_MATCH_ID) if SHOPEE_MATCH_ID.isdigit() else None,
                 "sortType": DEFAULT_SORT,
                 "page": 1
             }
-
-            # remove None values
-            variables = {k: v for k, v in variables.items() if v is not None}
+            # add matchId if provided
+            if SHOPEE_MATCH_ID and SHOPEE_MATCH_ID.isdigit():
+                variables["matchId"] = int(SHOPEE_MATCH_ID)
 
             payload = {"query": GRAPHQL_QUERY, "variables": variables}
             print("DEBUG: enviando GraphQL para:", SHOPEE_AFFILIATE_URL)
-            print("DEBUG: variables:", variables)
-            resp_raw = requests.post(SHOPEE_AFFILIATE_URL, headers=headers, json=payload, timeout=25)
+            print("DEBUG: variables:", {k: v for k, v in variables.items() if k != "app_id" or True})
+            resp_raw = post_graphql_signed(SHOPEE_AFFILIATE_URL, payload, str(SHOPEE_APP_ID), str(SHOPEE_APP_SECRET))
+
             print("DEBUG Shopee afiliada status:", resp_raw.status_code)
             try:
                 resp = resp_raw.json()
@@ -142,48 +163,47 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
                 print("DEBUG texto:", resp_raw.text[:800])
                 continue
 
-            # Se houver erro GraphQL, mostra e segue
+            # show GraphQL errors if any
             if isinstance(resp, dict) and resp.get("errors"):
                 print("DEBUG GraphQL errors:", resp.get("errors"))
-                # não quebra aqui; tenta próximo keyword
+                # no raise — tentamos próximas keywords
                 continue
 
-            # Tenta extrair nodes em diferentes caminhos
+            # extract nodes tolerant to structure variants
             nodes = []
             try:
-                if isinstance(resp, dict):
-                    data = resp.get("data", {})
-                    # data.productOfferV2.nodes
-                    pov = data.get("productOfferV2") or data.get("productOffer") or data
-                    if isinstance(pov, dict) and pov.get("nodes"):
-                        nodes = pov.get("nodes", [])
-                    elif isinstance(data, dict) and isinstance(data.get("nodes"), list):
-                        nodes = data.get("nodes")
-                    else:
-                        # procurar por qualquer lista dentro de data
-                        for v in data.values():
-                            if isinstance(v, list):
-                                nodes = v
-                                break
+                data = resp.get("data", {}) if isinstance(resp, dict) else {}
+                pov = data.get("productOfferV2") if isinstance(data, dict) else None
+                if pov and isinstance(pov, dict) and isinstance(pov.get("nodes"), list):
+                    nodes = pov.get("nodes")
+                elif isinstance(data.get("nodes"), list):
+                    nodes = data.get("nodes")
+                else:
+                    # search for any list inside data
+                    for v in (data.values() if isinstance(data, dict) else []):
+                        if isinstance(v, list):
+                            nodes = v
+                            break
             except Exception as e:
                 print("DEBUG erro ao localizar nodes:", e)
 
             print(f"DEBUG: encontrados {len(nodes)} nodes para keyword '{kw}'")
 
-            # Mapear cada node para nosso formato
             for item in nodes:
                 try:
-                    pid = item.get("product_id") or item.get("id") or item.get("itemid") or item.get("productId") or str(item.get("id", ""))
+                    pid = item.get("product_id") or item.get("id") or item.get("itemid") or str(item.get("id", ""))
                     title = item.get("name") or item.get("title") or item.get("product_name") or ""
-                    # preço: vários formatos possíveis
+                    # price handling
                     price = None
                     if isinstance(item.get("price"), (int, float)):
                         price = float(item.get("price"))
                     elif isinstance(item.get("min_price"), (int, float)):
                         price = float(item.get("min_price"))
                     elif isinstance(item.get("price"), dict) and item["price"].get("value"):
-                        price = float(item["price"].get("value", 0))
-                    # formato final do preço
+                        try:
+                            price = float(item["price"].get("value", 0))
+                        except:
+                            price = None
                     if price is None:
                         price_str = item.get("price_str") or item.get("price_text") or item.get("formatted_price") or "R$ 0,00"
                     else:
@@ -207,9 +227,12 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
                 except Exception as e:
                     print("DEBUG: falha ao mapear item:", e)
 
-            time.sleep(0.8)
+            # small delay per keyword to avoid rate limiting
+            time.sleep(0.6)
+
         except Exception as e:
             print("Erro ao buscar produtos (exc):", e)
+
     return offers
 
 # -------- Execução principal --------
