@@ -1,6 +1,6 @@
 # telegram_bot.py
-# Bot automático que busca produtos via Shopee Affiliate (GraphQL) e envia para Telegram
-# Inclui assinatura SHA256 no header de Authorization
+# Bot automático: busca produtos via Shopee Affiliate (GraphQL) e envia para Telegram
+# Inclui assinatura SHA256 correta (assina o payload exato enviado)
 # Autor: ChatGPT (ajuste para Karolyna)
 
 import os
@@ -10,15 +10,15 @@ import hashlib
 import requests
 from typing import List, Dict
 
-# -------- Configs (lidas de Secrets) --------
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# -------- Configs (lidas de Secrets) - strip() para evitar espaços extras --------
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID")
-SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET")
-SHOPEE_KEYWORDS = os.getenv("SHOPEE_KEYWORDS", "celular")
-SHOPEE_AFFILIATE_URL = os.getenv("SHOPEE_AFFILIATE_URL", "https://open-api.affiliate.shopee.com.br/graphql")
+SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID", "").strip()
+SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "").strip()
+SHOPEE_KEYWORDS = os.getenv("SHOPEE_KEYWORDS", "celular").strip()
+SHOPEE_AFFILIATE_URL = os.getenv("SHOPEE_AFFILIATE_URL", "https://open-api.affiliate.shopee.com.br/graphql").strip()
 SHOPEE_MATCH_ID = os.getenv("SHOPEE_MATCH_ID", "").strip()
 
 SENT_STORE = "sent_offers.json"
@@ -104,28 +104,36 @@ query productOfferV2Query($app_id: Int, $keyword: String, $limit: Int, $listType
 }
 """
 
-# -------- Função para enviar GraphQL com assinatura SHA256 exigida pela Shopee --------
+# -------- Função para enviar GraphQL assinada (assina e envia o mesmo payload bytes) --------
 def post_graphql_signed(url: str, payload: dict, app_id: str, app_secret: str) -> requests.Response:
     """
-    Monta o payload JSON compactado, gera timestamp e assinatura SHA256 e faz POST.
+    Gera assinatura SHA256 com o corpo EXATO que será enviado, e faz POST usando data=payload_bytes.
     Signature = SHA256( AppId + Timestamp + payload_str + AppSecret )
     Header Authorization: SHA256 Credential={AppId}, Timestamp={Timestamp}, Signature={Signature}
     """
     # compact JSON string (sem espaços) — importante para assinatura consistente
     payload_str = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+    payload_bytes = payload_str.encode("utf-8")
+
+    # timestamp
     timestamp = str(int(time.time()))
-    to_sign = f"{app_id}{timestamp}{payload_str}{app_secret}"
-    signature = hashlib.sha256(to_sign.encode("utf-8")).hexdigest()
+
+    # assinatura sobre bytes consistentes
+    to_sign = app_id.encode("utf-8") + timestamp.encode("utf-8") + payload_bytes + app_secret.encode("utf-8")
+    signature = hashlib.sha256(to_sign).hexdigest()
 
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"SHA256 Credential={app_id}, Timestamp={timestamp}, Signature={signature}"
     }
 
+    # Debugs seguros
     print(f"DEBUG: POST GraphQL to {url}")
-    # print payload size for debug (não imprime dados sensíveis)
-    print("DEBUG: payload length:", len(payload_str))
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
+    print("DEBUG: timestamp:", timestamp)
+    print("DEBUG: payload length (bytes):", len(payload_bytes))
+    print("DEBUG: signature (prefix):", signature[:6])
+
+    resp = requests.post(url, headers=headers, data=payload_bytes, timeout=30)
     return resp
 
 # -------- Busca via GraphQL (tolerante) --------
@@ -152,7 +160,8 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
 
             payload = {"query": GRAPHQL_QUERY, "variables": variables}
             print("DEBUG: enviando GraphQL para:", SHOPEE_AFFILIATE_URL)
-            print("DEBUG: variables:", {k: v for k, v in variables.items() if k != "app_id" or True})
+            print("DEBUG: variables (preview):", {k: v for k, v in variables.items() if k != "app_id" or True})
+
             resp_raw = post_graphql_signed(SHOPEE_AFFILIATE_URL, payload, str(SHOPEE_APP_ID), str(SHOPEE_APP_SECRET))
 
             print("DEBUG Shopee afiliada status:", resp_raw.status_code)
@@ -166,7 +175,7 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
             # show GraphQL errors if any
             if isinstance(resp, dict) and resp.get("errors"):
                 print("DEBUG GraphQL errors:", resp.get("errors"))
-                # no raise — tentamos próximas keywords
+                # don't raise; try next keyword
                 continue
 
             # extract nodes tolerant to structure variants
@@ -217,6 +226,7 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
                         item.get("thumbnail") or ""
                     )
 
+                    # only append if we have at least title or url
                     offers.append({
                         "id": str(pid),
                         "title": title,
@@ -288,7 +298,6 @@ def main():
         print("Arquivo new_offers.json criado com", len(sent_this_run), "ofertas.")
     except Exception as e:
         print("Erro ao gravar new_offers.json:", e)
-
 
 if __name__ == "__main__":
     main()
