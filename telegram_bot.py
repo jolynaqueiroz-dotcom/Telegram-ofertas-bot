@@ -1,142 +1,111 @@
 import os
 import json
-import time
 import requests
-from datetime import datetime
-import schedule
+from telegram import Bot
+from PIL import Image
+from io import BytesIO
 
-# Variáveis de ambiente
-SHOPEE_API_URL = os.getenv("SHOPEE_AFILIATE_URL")  # Certifique-se que é o correto
-SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID")
-SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET")
-SHOPEE_API_KEY = os.getenv("SHOPEE_API_KEY")
-SHOPEE_KEYWORDS = os.getenv("SHOPEE_KEYWORDS", "").split(",")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# --- Configurações via variáveis de ambiente ---
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+SHOPEE_APP_ID = os.getenv('SHOPEE_APP_ID')
+SHOPEE_APP_SECRET = os.getenv('SHOPEE_APP_SECRET')
+SHOPEE_API_KEY = os.getenv('SHOPEE_API_KEY')
+SHOPEE_AFILIATE_URL = os.getenv('SHOPEE_AFILIATE_URL')
 
-NEW_OFFERS_FILE = "new_offers.json"
+# Inicializa bot Telegram
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-
-def load_sent_offers():
-    if os.path.exists(NEW_OFFERS_FILE):
-        with open(NEW_OFFERS_FILE, "r") as f:
-            return json.load(f)
-    return []
-
-
-def save_sent_offers(sent_offers):
-    with open(NEW_OFFERS_FILE, "w") as f:
-        json.dump(sent_offers, f)
-
-
-def shopee_affiliate_query(keyword, limit=20, listType=0, sortType=2, page=1):
-    headers = {
-        "Authorization": f"Bearer {SHOPEE_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    query = """
-    query ($keyword: String!, $limit: Int!, $listType: Int!, $sortType: Int!, $page: Int!) {
-      productOfferV2(
-        keyword: $keyword,
-        limit: $limit,
-        listType: $listType,
-        sortType: $sortType,
-        page: $page
-      ) {
-        nodes {
-          itemId
-          productName
-          imageUrl
-          productLink
-          priceMin
-          priceMax
-          commissionRate
-          shopId
-          shopName
+# --- Função para buscar ofertas da Shopee ---
+def buscar_ofertas(keywords, limit=10):
+    ofertas = []
+    for keyword in keywords:
+        payload = {
+            "query": """
+            query shopeeOfferV2($keyword: String, $limit: Int, $sortType: Int, $page: Int) {
+                shopeeOfferV2(keyword: $keyword, limit: $limit, sortType: $sortType, page: 1) {
+                    nodes {
+                        offerName
+                        imageUrl
+                        priceMin
+                        priceMax
+                        commissionRate
+                        offerLink
+                        originalLink
+                        shopName
+                    }
+                }
+            }
+            """,
+            "variables": {
+                "keyword": keyword,
+                "limit": limit,
+                "sortType": 2,  # Maior comissão
+                "page": 1
+            }
         }
-        pageInfo {
-          hasNextPage
+
+        headers = {
+            "Authorization": f"Bearer {SHOPEE_API_KEY}",
+            "Content-Type": "application/json"
         }
-      }
-    }
-    """
 
-    variables = {
-        "keyword": keyword,
-        "limit": limit,
-        "listType": listType,
-        "sortType": sortType,
-        "page": page
-    }
+        try:
+            resp = requests.post(SHOPEE_AFILIATE_URL, headers=headers, json=payload)
+            data = resp.json()
+            nodes = data.get("data", {}).get("shopeeOfferV2", {}).get("nodes", [])
+            for node in nodes[:limit]:
+                ofertas.append(node)
+        except Exception as e:
+            print(f"Erro ao buscar {keyword}: {e}")
+    return ofertas
 
-    response = requests.post(
-        SHOPEE_API_URL,
-        json={"query": query, "variables": variables},
-        headers=headers
+# --- Função para enviar imagem + mensagem no Telegram ---
+def enviar_oferta(oferta):
+    nome = oferta.get("offerName")
+    preco_min = oferta.get("priceMin")
+    preco_max = oferta.get("priceMax")
+    shop = oferta.get("shopName")
+    link = oferta.get("offerLink")
+    imagem_url = oferta.get("imageUrl")
+
+    # Monta legenda
+    legenda = (
+        f"🛍 *{nome}*\n"
+        f"💰 De R${preco_max} por R${preco_min}\n"
+        f"🚚 Frete grátis | Parcelamento disponível\n"
+        f"🏬 Loja: {shop}\n"
+        f"[Comprar agora]({link})"
     )
 
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Erro Shopee: {response.status_code} - {response.text}")
-        return None
+    # Baixa imagem
+    try:
+        response = requests.get(imagem_url)
+        img = BytesIO(response.content)
+        bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=img, caption=legenda, parse_mode='Markdown')
+    except Exception as e:
+        print(f"Erro ao enviar oferta {nome}: {e}")
 
-
-def get_new_offers():
-    sent_offers = load_sent_offers()
-    new_offers = []
-
-    for keyword in SHOPEE_KEYWORDS:
-        for listType in [0, 1, 2]:
-            resp = shopee_affiliate_query(keyword, listType=listType)
-            if resp and "data" in resp and "productOfferV2" in resp["data"]:
-                nodes = resp["data"]["productOfferV2"]["nodes"]
-                for offer in nodes:
-                    offer_id = str(offer["itemId"])
-                    if offer_id not in sent_offers:
-                        new_offers.append(offer)
-                        sent_offers.append(offer_id)
-
-    save_sent_offers(sent_offers)
-    return new_offers
-
-
-def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-    requests.post(url, data=payload)
-
-
-def send_offers():
-    offers = get_new_offers()
-    if not offers:
-        send_telegram_message("⚠️ Nenhuma nova oferta encontrada no momento.")
+# --- Função principal ---
+def main():
+    keywords_env = os.getenv('SHOPEE_KEYWORDS', '')
+    if not keywords_env:
+        print("Nenhuma keyword configurada!")
+        return
+    keywords = [k.strip() for k in keywords_env.split(",") if k.strip()]
+    
+    ofertas = buscar_ofertas(keywords, limit=10)
+    
+    if not ofertas:
+        print("Nenhuma oferta encontrada.")
         return
 
-    for offer in offers:
-        text = (
-            f"*{offer['productName']}*\n"
-            f"Preço atual: {offer['priceMin']} - {offer['priceMax']}\n"
-            f"Loja: {offer['shopName']}\n"
-            f"[Link do produto]({offer['productLink']})"
-        )
-        send_telegram_message(text)
-        time.sleep(1)  # evitar rate limit do Telegram
+    # Evita duplicados no mesmo envio
+    enviados = set()
+    for oferta in ofertas:
+        if oferta.get("offerLink") not in enviados:
+            enviar_oferta(oferta)
+            enviados.add(oferta.get("offerLink"))
 
-
-# Agendamento nos horários: 09:00, 13:00, 16:00, 20:00
-schedule.every().day.at("09:00").do(send_offers)
-schedule.every().day.at("13:00").do(send_offers)
-schedule.every().day.at("16:00").do(send_offers)
-schedule.every().day.at("20:00").do(send_offers)
-
-print("Bot de ofertas iniciado. Aguardando horários...")
-
-while True:
-    schedule.run_pending()
-    time.sleep(30)
+if __name__ == "__main__":
+    main()
