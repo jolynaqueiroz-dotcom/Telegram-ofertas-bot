@@ -1,33 +1,35 @@
-name: Enviar ofertas para o Telegram
+name: Rodar Bot Telegram Shopee
+
 on:
-  workflow_dispatch:        # permite rodar manualmente pelo GitHub Actions
+  push:
+    branches: [main]
+  workflow_dispatch: # Permite rodar manualmente
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout do repositório
-        uses: actions/checkout@v3
+    - name: Checar código
+      uses: actions/checkout@v3
 
-      - name: Configurar Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
+    - name: Configurar Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
 
-      - name: Instalar dependências
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
+    - name: Instalar dependências
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests python-telegram-bot
 
-      - name: Executar script
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
-          SHOPEE_APP_SECRET: ${{ secrets.SHOPEE_APP_SECRET }}
-          SHOPEE_KEYWORDS: ${{ secrets.SHOPEE_KEYWORDS }}
-          SHOPEE_MATCH_ID: ${{ secrets.SHOPEE_MATCH_ID }}
-          SHOPEE_AFFILIATE_URL: ${{ secrets.SHOPEE_AFFILIATE_URL }}
-        run: |
-          python telegram_bot.py
+    - name: Rodar bot
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
+        SHOPEE_APP_SECRET: ${{ secrets.SHOPEE_APP_SECRET }}
+        SHOPEE_API_KEY: ${{ secrets.SHOPEE_API_KEY }}
+        SHOPEE_AFILIATE_URL: ${{ secrets.SHOPEE_AFILIATE_URL }}
+      run: |
+        python telegram_bot.py
