@@ -1,6 +1,6 @@
 # telegram_bot.py
 # Bot automático: busca produtos via Shopee Affiliate (GraphQL) e envia para Telegram
-# Inclui assinatura SHA256 correta (assina o payload exato enviado)
+# Corrigido: remove app_id da query, usa matchId Int64, campos corretos, assinatura SHA256
 # Autor: ChatGPT (ajuste para Karolyna)
 
 import os
@@ -74,31 +74,21 @@ def format_caption(offer: Dict) -> str:
     url = offer.get("url", "") or ""
     return f"<b>{title}</b>\n{price}\n<a href=\"{url}\">Ver oferta</a>"
 
-# -------- GraphQL query (productOfferV2) --------
+# -------- GraphQL query (productOfferV2) - corrected fields and matchId Int64 --------
 GRAPHQL_QUERY = """
-query productOfferV2Query($app_id: Int, $keyword: String, $limit: Int, $listType: Int, $matchId: Int, $sortType: Int, $page: Int) {
-  productOfferV2(app_id: $app_id, keyword: $keyword, limit: $limit, listType: $listType, matchId: $matchId, sortType: $sortType, page: $page) {
+query productOfferV2Query($keyword: String, $limit: Int, $listType: Int, $matchId: Int64, $sortType: Int, $page: Int) {
+  productOfferV2(keyword: $keyword, limit: $limit, listType: $listType, matchId: $matchId, sortType: $sortType, page: $page) {
     nodes {
-      product_id
-      itemid
-      id
-      name
-      title
+      itemId
+      productName
+      productLink
       imageUrl
-      image_url
-      image
-      thumbnail
-      price
-      min_price
-      price_str
-      product_url
-      url
-      merchant_id
-      shopid
+      shopId
+      productCatIds
+      # if price object exists it will be handled in parser
     }
     pageInfo {
       hasNextPage
-      endCursor
     }
   }
 }
@@ -106,19 +96,11 @@ query productOfferV2Query($app_id: Int, $keyword: String, $limit: Int, $listType
 
 # -------- Função para enviar GraphQL assinada (assina e envia o mesmo payload bytes) --------
 def post_graphql_signed(url: str, payload: dict, app_id: str, app_secret: str) -> requests.Response:
-    """
-    Gera assinatura SHA256 com o corpo EXATO que será enviado, e faz POST usando data=payload_bytes.
-    Signature = SHA256( AppId + Timestamp + payload_str + AppSecret )
-    Header Authorization: SHA256 Credential={AppId}, Timestamp={Timestamp}, Signature={Signature}
-    """
-    # compact JSON string (sem espaços) — importante para assinatura consistente
+    # compact JSON string (no spaces) — important for signature consistency
     payload_str = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
     payload_bytes = payload_str.encode("utf-8")
 
-    # timestamp
     timestamp = str(int(time.time()))
-
-    # assinatura sobre bytes consistentes
     to_sign = app_id.encode("utf-8") + timestamp.encode("utf-8") + payload_bytes + app_secret.encode("utf-8")
     signature = hashlib.sha256(to_sign).hexdigest()
 
@@ -127,7 +109,7 @@ def post_graphql_signed(url: str, payload: dict, app_id: str, app_secret: str) -
         "Authorization": f"SHA256 Credential={app_id}, Timestamp={timestamp}, Signature={signature}"
     }
 
-    # Debugs seguros
+    # debug
     print(f"DEBUG: POST GraphQL to {url}")
     print("DEBUG: timestamp:", timestamp)
     print("DEBUG: payload length (bytes):", len(payload_bytes))
@@ -146,21 +128,22 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
 
     for kw in keywords:
         try:
+            # NOTE: app_id removed from GraphQL variables (server expects no app_id arg)
             variables = {
-                "app_id": int(SHOPEE_APP_ID),
                 "keyword": kw,
                 "limit": DEFAULT_LIMIT,
                 "listType": DEFAULT_LISTTYPE,
                 "sortType": DEFAULT_SORT,
                 "page": 1
             }
-            # add matchId if provided
+            # add matchId if provided (must be Int64 type on server)
             if SHOPEE_MATCH_ID and SHOPEE_MATCH_ID.isdigit():
+                # GraphQL expects Int64 — send as integer (Python int is fine)
                 variables["matchId"] = int(SHOPEE_MATCH_ID)
 
             payload = {"query": GRAPHQL_QUERY, "variables": variables}
             print("DEBUG: enviando GraphQL para:", SHOPEE_AFFILIATE_URL)
-            print("DEBUG: variables (preview):", {k: v for k, v in variables.items() if k != "app_id" or True})
+            print("DEBUG: variables (preview):", variables)
 
             resp_raw = post_graphql_signed(SHOPEE_AFFILIATE_URL, payload, str(SHOPEE_APP_ID), str(SHOPEE_APP_SECRET))
 
@@ -200,33 +183,27 @@ def fetch_from_shopee_affiliate(keywords: List[str]) -> List[Dict]:
 
             for item in nodes:
                 try:
-                    pid = item.get("product_id") or item.get("id") or item.get("itemid") or str(item.get("id", ""))
-                    title = item.get("name") or item.get("title") or item.get("product_name") or ""
-                    # price handling
-                    price = None
-                    if isinstance(item.get("price"), (int, float)):
-                        price = float(item.get("price"))
-                    elif isinstance(item.get("min_price"), (int, float)):
-                        price = float(item.get("min_price"))
-                    elif isinstance(item.get("price"), dict) and item["price"].get("value"):
-                        try:
-                            price = float(item["price"].get("value", 0))
-                        except:
-                            price = None
-                    if price is None:
-                        price_str = item.get("price_str") or item.get("price_text") or item.get("formatted_price") or "R$ 0,00"
-                    else:
-                        price_str = f"R$ {price:.2f}"
-
-                    url_item = item.get("url") or item.get("product_url") or item.get("item_url") or ""
+                    # map common fields with the names the API suggests
+                    pid = item.get("itemId") or item.get("productId") or item.get("id") or str(item.get("itemId", ""))
+                    title = item.get("productName") or item.get("name") or item.get("title") or ""
+                    url_item = item.get("productLink") or item.get("product_link") or item.get("productUrl") or ""
                     img = (
                         item.get("imageUrl") or
                         item.get("image_url") or
                         item.get("image") or
-                        item.get("thumbnail") or ""
+                        (item.get("thumbnail") if isinstance(item.get("thumbnail"), str) else "")
                     )
 
-                    # only append if we have at least title or url
+                    # price mapping (tolerant)
+                    price_str = "R$ 0,00"
+                    if isinstance(item.get("price"), (int, float)):
+                        price_str = f"R$ {float(item.get('price')):.2f}"
+                    elif isinstance(item.get("min_price"), (int, float)):
+                        price_str = f"R$ {float(item.get('min_price')):.2f}"
+                    elif isinstance(item.get("price"), dict):
+                        # try to find a display string inside price object
+                        price_str = item["price"].get("price_text") or item["price"].get("price_str") or price_str
+
                     offers.append({
                         "id": str(pid),
                         "title": title,
