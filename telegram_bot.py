@@ -1,10 +1,9 @@
 # telegram_bot.py
 # Bot automático: busca produtos via Shopee Affiliate (GraphQL) e envia para Telegram
-# Melhorias:
-#  - testa até 3 keywords por execução
-#  - DEFAULT_LIMIT aumentado para 5
-#  - quando nodes == 0 faz print do JSON de resposta (debug)
-#  - envia alerta ao chat se todos os termos testados retornarem 0 ou ocorrer System Error
+# - Testa listType 0,1,2
+# - DEFAULT_LIMIT = 10
+# - Fallback para API pública de busca se afiliada não trouxer ofertas
+# - Envia alertas para ALERT_CHAT_ID (se definido) ou TELEGRAM_CHAT_ID
 # Autor: ChatGPT (ajuste para Karolyna)
 
 import os
@@ -12,25 +11,30 @@ import time
 import json
 import hashlib
 import requests
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 # -------- Configs (strip) --------
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+# TELEGRAM_CHAT_ID: destino principal (normalmente o grupo)
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+# ALERT_CHAT_ID: onde serão enviados alertas; se vazio, alertas vão para TELEGRAM_CHAT_ID
+ALERT_CHAT_ID = os.getenv("ALERT_CHAT_ID", "").strip() or TELEGRAM_CHAT_ID
+
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID", "").strip()
 SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "").strip()
-SHOPEE_KEYWORDS = os.getenv("SHOPEE_KEYWORDS", "celular").strip()
+SHOPEE_KEYWORDS = os.getenv("SHOPEE_KEYWORDS", "celular;fones;tv").strip()
 SHOPEE_AFFILIATE_URL = os.getenv("SHOPEE_AFFILIATE_URL", "https://open-api.affiliate.shopee.com.br/graphql").strip()
 SHOPEE_MATCH_ID = os.getenv("SHOPEE_MATCH_ID", "").strip()
 
 SENT_STORE = "sent_offers.json"
 
-if not BOT_TOKEN or not CHAT_ID:
-    raise SystemExit("ERRO: Defina TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID nas Secrets do repositório.")
+# sanity checks
+if not BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    raise SystemExit("ERRO: Defina TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID nos Secrets do repositório.")
 if not SHOPEE_APP_ID or not SHOPEE_APP_SECRET:
-    raise SystemExit("ERRO: Defina SHOPEE_APP_ID e SHOPEE_APP_SECRET nas Secrets do repositório.")
+    raise SystemExit("ERRO: Defina SHOPEE_APP_ID e SHOPEE_APP_SECRET nos Secrets do repositório.")
 
 # -------- Helpers de arquivo (histórico) --------
 def load_sent_ids() -> set:
@@ -124,151 +128,179 @@ def post_graphql_signed_with_timestamp_candidates(url: str, payload: dict, app_i
         raise last_exception
     return None
 
-# -------- Busca via GraphQL com melhorias --------
-def fetch_from_shopee_affiliate(keywords: List[str]) -> (List[Dict], List[Dict]):
-    """
-    retorna (offers, details_per_keyword)
-    details_per_keyword contém dicts com 'keyword', 'nodes_count', 'errors', 'resp_text_preview'
-    """
+# -------- Fallback: public search endpoint --------
+def fetch_from_shopee_public(keywords: List[str], max_per_kw: int = 10) -> List[Dict]:
+    offers = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for kw in keywords:
+        try:
+            kw_encoded = requests.utils.requote_uri(kw)
+            url = f"https://shopee.com.br/api/v4/search/search_items?by=sales&keyword={kw_encoded}&limit={max_per_kw}&order=desc&page_type=search"
+            resp = requests.get(url, headers=headers, timeout=15)
+            data = resp.json() if resp is not None else {}
+            items = data.get("items", []) if isinstance(data, dict) else []
+            print(f"DEBUG fallback: found {len(items)} public items for '{kw}'")
+            for it in items:
+                b = it.get("item_basic", {})
+                shopid = b.get("shopid")
+                itemid = b.get("itemid")
+                name = b.get("name","")
+                image = b.get("image")
+                price = None
+                try:
+                    price = int(b.get("price", 0)) / 100000
+                except Exception:
+                    price = 0
+                url_item = f"https://shopee.com.br/product/{shopid}/{itemid}" if shopid and itemid else ""
+                img_url = f"https://down-br.img.susercontent.com/file/{image}" if image else ""
+                offers.append({
+                    "id": f"pub-{shopid}-{itemid}",
+                    "title": name,
+                    "price": f"R$ {price:.2f}",
+                    "url": url_item,
+                    "image_url": img_url
+                })
+        except Exception as e:
+            print("DEBUG: fallback public search error for", kw, e)
+        time.sleep(0.6)
+    return offers
+
+# -------- Busca via GraphQL com listType testing e melhorias --------
+def fetch_from_shopee_affiliate(keywords: List[str]) -> Tuple[List[Dict], List[Dict]]:
     offers = []
     details = []
 
-    DEFAULT_LIMIT = 5     # aumentado
-    DEFAULT_LISTTYPE = 0
+    DEFAULT_LIMIT = 10
+    DEFAULT_LISTTYPES = [0, 1, 2]
     DEFAULT_SORT = 2
+    MAX_KEYWORDS = 3
 
-    # testar no máximo 3 keywords por execução
-    keywords_to_test = [k.strip() for k in keywords if k.strip()][:3]
+    keywords_to_test = [k.strip() for k in keywords if k.strip()][:MAX_KEYWORDS]
     print("DEBUG: keywords_to_test =", keywords_to_test)
 
     for kw in keywords_to_test:
-        detail = {"keyword": kw, "nodes_count": 0, "errors": None, "resp_text_preview": ""}
-        try:
-            variables = {
-                "keyword": kw,
-                "limit": DEFAULT_LIMIT,
-                "listType": DEFAULT_LISTTYPE,
-                "sortType": DEFAULT_SORT,
-                "page": 1
-            }
-            if SHOPEE_MATCH_ID and SHOPEE_MATCH_ID.isdigit():
-                variables["matchId"] = int(SHOPEE_MATCH_ID)
-
-            payload = {"query": GRAPHQL_QUERY, "variables": variables}
-            print("DEBUG: enviando GraphQL para:", SHOPEE_AFFILIATE_URL)
-            print("DEBUG: variables (preview):", variables)
-
-            resp_raw = post_graphql_signed_with_timestamp_candidates(SHOPEE_AFFILIATE_URL, payload, str(SHOPEE_APP_ID), str(SHOPEE_APP_SECRET))
-            print("DEBUG Shopee afiliada status:", resp_raw.status_code)
-
+        for list_type in DEFAULT_LISTTYPES:
+            detail = {"keyword": kw, "listType": list_type, "nodes_count": 0, "errors": None, "resp_text_preview": ""}
             try:
-                resp = resp_raw.json()
-            except Exception as e:
-                detail["errors"] = f"invalid-json: {e}"
-                detail["resp_text_preview"] = resp_raw.text[:2000]
-                print("DEBUG: resposta não é JSON:", e)
-                print("DEBUG text (first 2000 chars):", resp_raw.text[:2000])
-                details.append(detail)
-                continue
+                variables = {
+                    "keyword": kw,
+                    "limit": DEFAULT_LIMIT,
+                    "listType": list_type,
+                    "sortType": DEFAULT_SORT,
+                    "page": 1
+                }
+                if SHOPEE_MATCH_ID and SHOPEE_MATCH_ID.isdigit():
+                    variables["matchId"] = int(SHOPEE_MATCH_ID)
 
-            # se houver erros GraphQL, guarda e registra resp text
-            if isinstance(resp, dict) and resp.get("errors"):
-                detail["errors"] = resp.get("errors")
-                detail["resp_text_preview"] = resp_raw.text[:2000]
-                print("DEBUG GraphQL errors:", resp.get("errors"))
-                print("DEBUG resp text (first 2000 chars):", resp_raw.text[:2000])
-                details.append(detail)
-                continue
+                payload = {"query": GRAPHQL_QUERY, "variables": variables}
+                print("DEBUG: enviando GraphQL para:", SHOPEE_AFFILIATE_URL)
+                print("DEBUG: variables (preview):", variables)
 
-            # extrair nodes
-            nodes = []
-            try:
-                data = resp.get("data", {}) if isinstance(resp, dict) else {}
-                pov = data.get("productOfferV2")
-                if pov and isinstance(pov, dict) and isinstance(pov.get("nodes"), list):
-                    nodes = pov.get("nodes")
-                else:
-                    for v in (data.values() if isinstance(data, dict) else []):
-                        if isinstance(v, list):
-                            nodes = v
-                            break
-            except Exception as e:
-                print("DEBUG erro ao localizar nodes:", e)
+                resp_raw = post_graphql_signed_with_timestamp_candidates(SHOPEE_AFFILIATE_URL, payload, str(SHOPEE_APP_ID), str(SHOPEE_APP_SECRET))
+                print("DEBUG Shopee afiliada status:", resp_raw.status_code)
 
-            print(f"DEBUG: encontrados {len(nodes)} nodes para keyword '{kw}'")
-            detail["nodes_count"] = len(nodes)
-            detail["resp_text_preview"] = json.dumps(resp, ensure_ascii=False)[:2000] if isinstance(resp, dict) else str(resp)[:2000]
-
-            # se nodes == 0, imprime o JSON (ajuda debugging)
-            if not nodes:
-                print("DEBUG resp JSON (no nodes):", detail["resp_text_preview"])
-
-            for item in nodes:
                 try:
-                    pid = item.get("itemId") or item.get("productId") or item.get("id") or str(item.get("itemId", ""))
-                    title = item.get("productName") or item.get("product_name") or item.get("name") or ""
-                    url_item = item.get("productLink") or item.get("product_link") or item.get("productUrl") or ""
-                    img = (
-                        item.get("imageUrl") or
-                        item.get("image_url") or
-                        item.get("image") or
-                        (item.get("thumbnail") if isinstance(item.get("thumbnail"), str) else "")
-                    )
-
-                    price_str = "R$ 0,00"
-                    if isinstance(item.get("price"), (int, float)):
-                        price_str = f"R$ {float(item.get('price')):.2f}"
-                    elif isinstance(item.get("min_price"), (int, float)):
-                        price_str = f"R$ {float(item.get('min_price')):.2f}"
-                    elif isinstance(item.get("price"), dict):
-                        price_str = item["price"].get("price_text") or item["price"].get("price_str") or price_str
-
-                    offers.append({
-                        "id": str(pid),
-                        "title": title,
-                        "price": price_str,
-                        "url": url_item,
-                        "image_url": img
-                    })
+                    resp = resp_raw.json()
                 except Exception as e:
-                    print("DEBUG: falha ao mapear item:", e)
+                    detail["errors"] = f"invalid-json: {e}"
+                    detail["resp_text_preview"] = resp_raw.text[:4000]
+                    print("DEBUG: resposta não é JSON:", e)
+                    print("DEBUG text (first 4000 chars):", resp_raw.text[:4000])
+                    details.append(detail)
+                    continue
 
-            details.append(detail)
-            time.sleep(0.6)
+                if isinstance(resp, dict) and resp.get("errors"):
+                    detail["errors"] = resp.get("errors")
+                    detail["resp_text_preview"] = resp_raw.text[:4000]
+                    print("DEBUG GraphQL errors:", resp.get("errors"))
+                    print("DEBUG resp text (first 4000 chars):", resp_raw.text[:4000])
+                    details.append(detail)
+                    continue
 
-        except Exception as e:
-            detail["errors"] = str(e)
-            details.append(detail)
-            print("Erro ao buscar produtos (exc):", e)
+                nodes = []
+                try:
+                    data = resp.get("data", {}) if isinstance(resp, dict) else {}
+                    pov = data.get("productOfferV2")
+                    if pov and isinstance(pov, dict) and isinstance(pov.get("nodes"), list):
+                        nodes = pov.get("nodes")
+                    else:
+                        for v in (data.values() if isinstance(data, dict) else []):
+                            if isinstance(v, list):
+                                nodes = v
+                                break
+                except Exception as e:
+                    print("DEBUG erro ao localizar nodes:", e)
+
+                print(f"DEBUG: encontrados {len(nodes)} nodes para keyword '{kw}' listType={list_type}")
+                detail["nodes_count"] = len(nodes)
+                detail["resp_text_preview"] = json.dumps(resp, ensure_ascii=False)[:4000] if isinstance(resp, dict) else str(resp)[:4000]
+
+                if not nodes:
+                    print("DEBUG resp JSON (no nodes):", detail["resp_text_preview"])
+
+                for item in nodes:
+                    try:
+                        pid = item.get("itemId") or item.get("productId") or item.get("id") or str(item.get("itemId", ""))
+                        title = item.get("productName") or item.get("product_name") or item.get("name") or ""
+                        url_item = item.get("productLink") or item.get("product_link") or item.get("productUrl") or ""
+                        img = (
+                            item.get("imageUrl") or
+                            item.get("image_url") or
+                            item.get("image") or
+                            (item.get("thumbnail") if isinstance(item.get("thumbnail"), str) else "")
+                        )
+                        price_str = "R$ 0,00"
+                        if isinstance(item.get("price"), (int, float)):
+                            price_str = f"R$ {float(item.get('price')):.2f}"
+                        elif isinstance(item.get("min_price"), (int, float)):
+                            price_str = f"R$ {float(item.get('min_price')):.2f}"
+                        elif isinstance(item.get("price"), dict):
+                            price_str = item["price"].get("price_text") or item["price"].get("price_str") or price_str
+
+                        offers.append({
+                            "id": str(pid),
+                            "title": title,
+                            "price": price_str,
+                            "url": url_item,
+                            "image_url": img
+                        })
+                    except Exception as e:
+                        print("DEBUG: falha ao mapear item:", e)
+
+                details.append(detail)
+                time.sleep(0.6)
+
+            except Exception as e:
+                detail["errors"] = str(e)
+                details.append(detail)
+                print("Erro ao buscar produtos (exc):", e)
 
     return offers, details
 
-# -------- Alerta se falha generalizada --------
-def send_failure_alert(details: List[Dict]):
-    """
-    Se todas as keywords testadas falharem (0 nodes ou GraphQL errors), envia alerta resumido ao chat.
-    """
-    summary = []
-    all_zero_or_error = True
-    for d in details:
-        if d.get("nodes_count", 0) > 0:
-            all_zero_or_error = False
-        summary.append(f"{d['keyword']}: nodes={d.get('nodes_count',0)}, errors={'sim' if d.get('errors') else 'não'}")
-    if not all_zero_or_error:
-        return  # não envia alerta se encontrou algo
+# -------- Alerta se falha generalizada (usa ALERT_CHAT_ID) --------
+def send_failure_alert(details: List[Dict], alert_chat_id: str = ALERT_CHAT_ID):
+    any_nodes = any(d.get("nodes_count", 0) > 0 for d in details)
+    if any_nodes:
+        return
 
     ts = int(time.time())
+    summary_lines = []
+    for d in details:
+        summary_lines.append(f"{d.get('keyword')} (listType={d.get('listType')}): nodes={d.get('nodes_count',0)}, errors={'sim' if d.get('errors') else 'não'}")
     text = "<b>⚠️ Alerta do bot de ofertas</b>\n"
-    text += f"Todas as keywords testadas retornaram 0 ou erros.\nTimestamp: {ts}\n\nResumo:\n"
-    text += "\n".join(summary)
-    # anexa preview do último resp_text_preview (cortado)
-    last_preview = details[-1].get("resp_text_preview", "")
+    text += f"Todas as combinações testadas retornaram 0 ou erros.\nTimestamp: {ts}\n\nResumo:\n"
+    text += "\n".join(summary_lines)
+    last_preview = ""
+    for d in reversed(details):
+        if d.get("resp_text_preview"):
+            last_preview = d["resp_text_preview"]
+            break
     if last_preview:
         text += "\n\nÚltima resposta (preview):\n"
-        text += last_preview if isinstance(last_preview, str) else str(last_preview)
-    # envia alerta (se falhar, apenas imprime)
+        text += (last_preview[:3500] + "...") if len(last_preview) > 3500 else last_preview
+
     try:
-        resp = send_message(CHAT_ID, text)
+        resp = send_message(alert_chat_id, text)
         print("DEBUG: alerta enviado, resp:", resp)
     except Exception as e:
         print("DEBUG: falha ao enviar alerta:", e)
@@ -281,13 +313,23 @@ def main():
     print("DEBUG: keywords (all) =", keywords)
 
     offers, details = fetch_from_shopee_affiliate(keywords)
-    sent_this_run = []
 
-    # se todas as keywords testadas retornaram 0 ou erro, manda alerta
-    send_failure_alert(details)
-
+    # if affiliate returned nothing, try fallback public search
     if not offers:
-        print("DEBUG: Nenhuma oferta retornada pela API de afiliada.")
+        print("DEBUG: afiliada não trouxe ofertas — tentando fallback público...")
+        fallback_offers = fetch_from_shopee_public(keywords, max_per_kw=10)
+        if fallback_offers:
+            offers = fallback_offers
+            print("DEBUG: fallback público trouxe", len(offers), "ofertas")
+        else:
+            print("DEBUG: fallback público não trouxe ofertas")
+
+    # if still nothing useful, send alert (private)
+    send_failure_alert(details, alert_chat_id=ALERT_CHAT_ID)
+
+    sent_this_run = []
+    if not offers:
+        print("DEBUG: Nenhuma oferta retornada (afiliada + fallback).")
 
     for offer in offers:
         oid = offer.get("id")
@@ -298,7 +340,7 @@ def main():
 
         caption = format_caption(offer)
 
-        resp = send_photo(CHAT_ID, offer.get("image_url") or "", caption)
+        resp = send_photo(TELEGRAM_CHAT_ID, offer.get("image_url") or "", caption)
         if resp.get("ok"):
             print("✅ Enviado (foto):", offer.get("title"))
             new_sent.add(oid)
@@ -308,7 +350,7 @@ def main():
 
         print("❌ Falha ao enviar foto:", resp)
         fallback_text = f"{offer.get('title')}\n{offer.get('price')}\n{offer.get('url')}\n\n(Imagem não enviada — link acima)"
-        resp_msg = send_message(CHAT_ID, fallback_text)
+        resp_msg = send_message(TELEGRAM_CHAT_ID, fallback_text)
         if resp_msg.get("ok"):
             print("✅ Enviado (fallback texto):", offer.get("title"))
             new_sent.add(oid)
