@@ -1,17 +1,16 @@
-name: Telegram Shopee Bot
+name: Run Telegram Bot
 
 on:
   schedule:
-    # Rodar automaticamente em 09:00, 13:00, 16:00 e 20:00 (UTC-3)
-    - cron: '0 12,16,19,23 * * *'
-  workflow_dispatch: # Permite rodar manualmente
+    # Aqui você pode definir horários automáticos se quiser rodar sem precisar manual
+    - cron: '0 9,13,16,20 * * *'  # executa às 9h, 13h, 16h e 20h UTC
+  workflow_dispatch:  # permite rodar manualmente pelo GitHub
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
 
     env:
-      # Variáveis do seu GitHub
       SHOPEE_AFFILIATE_URL: ${{ secrets.SHOPEE_AFFILIATE_URL }}
       SHOPEE_AFILIATE_URL: ${{ secrets.SHOPEE_AFILIATE_URL }}
       SHOPEE_API_KEY: ${{ secrets.SHOPEE_API_KEY }}
@@ -23,20 +22,18 @@ jobs:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11' # ou a versão que você estiver usando
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'  # ou a versão que você usa localmente
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install schedule requests python-telegram-bot pillow
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-    - name: Run Telegram Bot
-      run: |
-        python telegram_bot.py
+      - name: Run Telegram Bot
+        run: python telegram_bot.py
