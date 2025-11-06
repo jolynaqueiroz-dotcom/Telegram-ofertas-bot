@@ -1,42 +1,42 @@
-name: Run Telegram Bot
+name: Telegram Shopee Bot
 
-# Aciona o bot nos horários definidos e também ao dar push no main
 on:
-  push:
-    branches: [ main ]
   schedule:
-    - cron: '0 9 * * *'
-    - cron: '0 13 * * *'
-    - cron: '0 16 * * *'
-    - cron: '0 20 * * *'
+    # Rodar automaticamente em 09:00, 13:00, 16:00 e 20:00 (UTC-3)
+    - cron: '0 12,16,19,23 * * *'
+  workflow_dispatch: # Permite rodar manualmente
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
 
+    env:
+      # Variáveis do seu GitHub
+      SHOPEE_AFFILIATE_URL: ${{ secrets.SHOPEE_AFFILIATE_URL }}
+      SHOPEE_AFILIATE_URL: ${{ secrets.SHOPEE_AFILIATE_URL }}
+      SHOPEE_API_KEY: ${{ secrets.SHOPEE_API_KEY }}
+      SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
+      SHOPEE_APP_SECRET: ${{ secrets.SHOPEE_APP_SECRET }}
+      SHOPEE_KEYWORDS: ${{ secrets.SHOPEE_KEYWORDS }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+
     steps:
-    - name: Checkout repo
+    - name: Checkout repository
       uses: actions/checkout@v3
 
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
+        python-version: '3.11' # ou a versão que você estiver usando
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install python-telegram-bot requests pillow schedule
+        pip install -r requirements.txt
+        pip install schedule requests python-telegram-bot pillow
 
-    - name: Run bot
-      run: python telegram_bot.py
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-        SHOPEE_APP_ID: ${{ secrets.SHOPEE_APP_ID }}
-        SHOPEE_APP_SECRET: ${{ secrets.SHOPEE_APP_SECRET }}
-        SHOPEE_API_KEY: ${{ secrets.SHOPEE_API_KEY }}
-        SHOPEE_AFFILIATE_URL: ${{ secrets.SHOPEE_AFFILIATE_URL }}
-        SHOPEE_AFILIATE_URL: ${{ secrets.SHOPEE_AFILIATE_URL }}
-        SHOPEE_KEYWORDS: ${{ secrets.SHOPEE_KEYWORDS }}
+    - name: Run Telegram Bot
+      run: |
+        python telegram_bot.py
