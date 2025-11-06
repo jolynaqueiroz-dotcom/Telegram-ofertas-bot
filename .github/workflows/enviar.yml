@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch: # Permite rodar manualmente
-- name: Install dependencies
-  run: pip install python-telegram-bot requests pillow
 jobs:
   run-bot:
     runs-on: ubuntu-latest
