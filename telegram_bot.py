@@ -1,111 +1,151 @@
 import os
-import json
 import requests
 from telegram import Bot
-from PIL import Image
-from io import BytesIO
+from telegram.ext import Updater, MessageHandler, Filters
+from PIL import Image, ImageDraw, ImageFont
+import io
+import random
 
-# --- Configurações via variáveis de ambiente ---
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-SHOPEE_APP_ID = os.getenv('SHOPEE_APP_ID')
-SHOPEE_APP_SECRET = os.getenv('SHOPEE_APP_SECRET')
-SHOPEE_API_KEY = os.getenv('SHOPEE_API_KEY')
-SHOPEE_AFILIATE_URL = os.getenv('SHOPEE_AFILIATE_URL')
+# ----------------------------
+# Variáveis de ambiente
+# ----------------------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # ID do seu grupo de ofertas
+SHOPEE_AFILIATE_URL = os.getenv("SHOPEE_AFILIATE_URL")
+SHOPEE_API_KEY = os.getenv("SHOPEE_API_KEY")
 
-# Inicializa bot Telegram
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-# --- Função para buscar ofertas da Shopee ---
-def buscar_ofertas(keywords, limit=10):
-    ofertas = []
-    for keyword in keywords:
-        payload = {
-            "query": """
-            query shopeeOfferV2($keyword: String, $limit: Int, $sortType: Int, $page: Int) {
-                shopeeOfferV2(keyword: $keyword, limit: $limit, sortType: $sortType, page: 1) {
-                    nodes {
-                        offerName
-                        imageUrl
-                        priceMin
-                        priceMax
-                        commissionRate
-                        offerLink
-                        originalLink
-                        shopName
-                    }
-                }
+# ----------------------------
+# Função para buscar ofertas
+# ----------------------------
+def buscar_ofertas(keyword, limit=10):
+    headers = {
+        "Authorization": f"{SHOPEE_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "query": """
+        query productOfferV2($keyword: String!, $limit: Int!){
+          productOfferV2(keyword: $keyword, limit: $limit) {
+            nodes {
+              productName
+              priceMin
+              priceMax
+              imageUrl
+              offerLink
+              shippingFee
+              installment
             }
-            """,
-            "variables": {
-                "keyword": keyword,
-                "limit": limit,
-                "sortType": 2,  # Maior comissão
-                "page": 1
-            }
+          }
         }
+        """,
+        "variables": {"keyword": keyword, "limit": limit}
+    }
 
-        headers = {
-            "Authorization": f"Bearer {SHOPEE_API_KEY}",
-            "Content-Type": "application/json"
-        }
+    response = requests.post(SHOPEE_AFILIATE_URL, json=payload, headers=headers)
+    if response.status_code != 200:
+        return []
 
-        try:
-            resp = requests.post(SHOPEE_AFILIATE_URL, headers=headers, json=payload)
-            data = resp.json()
-            nodes = data.get("data", {}).get("shopeeOfferV2", {}).get("nodes", [])
-            for node in nodes[:limit]:
-                ofertas.append(node)
-        except Exception as e:
-            print(f"Erro ao buscar {keyword}: {e}")
-    return ofertas
+    data = response.json()
+    nodes = data.get("data", {}).get("productOfferV2", {}).get("nodes", [])
+    
+    # Evita produtos repetidos
+    produtos_unicos = []
+    seen = set()
+    for node in nodes:
+        pid = node.get("offerLink")
+        if pid and pid not in seen:
+            produtos_unicos.append(node)
+            seen.add(pid)
+    return produtos_unicos
 
-# --- Função para enviar imagem + mensagem no Telegram ---
-def enviar_oferta(oferta):
-    nome = oferta.get("offerName")
-    preco_min = oferta.get("priceMin")
-    preco_max = oferta.get("priceMax")
-    shop = oferta.get("shopName")
-    link = oferta.get("offerLink")
-    imagem_url = oferta.get("imageUrl")
+# ----------------------------
+# Função para gerar templates para stories
+# ----------------------------
+def gerar_template(oferta):
+    nome = oferta.get("productName", "Produto")
+    preco_atual = oferta.get("priceMin", "Indisponível")
+    preco_anterior = oferta.get("priceMax", "Indisponível")
+    frete = "Frete grátis" if oferta.get("shippingFee", 0) == 0 else "Frete pago"
+    parcelamento = oferta.get("installment", "Parcelamento não disponível")
+    imagem_url = oferta.get("imageUrl", None)
 
-    # Monta legenda
-    legenda = (
-        f"🛍 *{nome}*\n"
-        f"💰 De R${preco_max} por R${preco_min}\n"
-        f"🚚 Frete grátis | Parcelamento disponível\n"
-        f"🏬 Loja: {shop}\n"
-        f"[Comprar agora]({link})"
-    )
-
-    # Baixa imagem
-    try:
+    # Baixa a imagem do produto
+    if imagem_url:
         response = requests.get(imagem_url)
-        img = BytesIO(response.content)
-        bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=img, caption=legenda, parse_mode='Markdown')
-    except Exception as e:
-        print(f"Erro ao enviar oferta {nome}: {e}")
+        imagem_produto = Image.open(io.BytesIO(response.content))
+    else:
+        imagem_produto = Image.new("RGB", (600, 600), color=(255, 255, 255))
 
-# --- Função principal ---
-def main():
-    keywords_env = os.getenv('SHOPEE_KEYWORDS', '')
-    if not keywords_env:
-        print("Nenhuma keyword configurada!")
-        return
-    keywords = [k.strip() for k in keywords_env.split(",") if k.strip()]
-    
-    ofertas = buscar_ofertas(keywords, limit=10)
-    
+    # Cria a imagem do template
+    largura, altura = imagem_produto.size
+    template = Image.new("RGB", (largura, altura + 150), color=(230, 220, 250))  # lilás bebê
+    template.paste(imagem_produto, (0,0))
+
+    draw = ImageDraw.Draw(template)
+    font = ImageFont.load_default()
+
+    draw.text((10, altura + 10), f"{nome}", fill="black", font=font)
+    draw.text((10, altura + 40), f"De: {preco_anterior} ➡️ Agora: {preco_atual}", fill="black", font=font)
+    draw.text((10, altura + 70), f"{frete} | {parcelamento}", fill="black", font=font)
+    draw.text((10, altura + 100), "Achadinho Da Káh", fill="purple", font=font)
+
+    # Salva em bytes
+    bytes_io = io.BytesIO()
+    template.save(bytes_io, format="PNG")
+    bytes_io.seek(0)
+    return bytes_io
+
+# ----------------------------
+# Função para enviar ofertas
+# ----------------------------
+def enviar_ofertas(keyword):
+    ofertas = buscar_ofertas(keyword)
     if not ofertas:
-        print("Nenhuma oferta encontrada.")
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"Nenhuma oferta encontrada para: {keyword}")
         return
 
-    # Evita duplicados no mesmo envio
-    enviados = set()
     for oferta in ofertas:
-        if oferta.get("offerLink") not in enviados:
-            enviar_oferta(oferta)
-            enviados.add(oferta.get("offerLink"))
+        nome = oferta.get("productName", "Produto")
+        preco_atual = oferta.get("priceMin", "Indisponível")
+        preco_anterior = oferta.get("priceMax", "Indisponível")
+        link = oferta.get("offerLink", "#")
+        frete = "Frete grátis" if oferta.get("shippingFee", 0) == 0 else "Frete pago"
+        parcelamento = oferta.get("installment", "Parcelamento não disponível")
+        imagem = gerar_template(oferta)
+
+        mensagem = (
+            f"🛍 *{nome}*\n"
+            f"💰 De: {preco_anterior} ➡️ Agora: {preco_atual}\n"
+            f"{frete} | {parcelamento}\n"
+            f"[Clique aqui para comprar]({link})"
+        )
+
+        bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=imagem, caption=mensagem, parse_mode="Markdown")
+
+# ----------------------------
+# Função para receber mensagens do usuário
+# ----------------------------
+def handle_message(update, context):
+    text = update.message.text.strip()
+    if text:
+        enviar_ofertas(text)
+
+# ----------------------------
+# Main
+# ----------------------------
+def main():
+    updater = Updater(token=TELEGRAM_BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    # Recebe qualquer mensagem de texto enviada para o bot
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
+    # Inicia o bot
+    print("Bot iniciado e aguardando mensagens...")
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
