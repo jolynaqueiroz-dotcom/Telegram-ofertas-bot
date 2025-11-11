@@ -4,7 +4,6 @@ import axios from "axios";
 import crypto from "crypto";
 import TelegramBot from "node-telegram-bot-api";
 
-// Corrigido para bater com a variável que você salvou no Render
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
@@ -88,23 +87,23 @@ app.get("/fetch", async (req, res) => {
 // Endpoint que envia ofertas para o Telegram
 app.get("/push", async (req, res) => {
   try {
-    const offersToSend = await fetchOffersPage(1); // ou todas as páginas que quiser
-    await Promise.all(
-      offersToSend.map(async offer => {
-        try {
-          const msg = `${offer.productName}\nPreço: ${offer.priceMin}\nLink: ${offer.offerLink}`;
-          await bot.sendMessage(CHAT_ID, msg);
-        } catch (err) {
-          console.log(`Erro enviando ${offer.productName}:`, err.message);
-        }
-      })
-    );
+    const offersToSend = (await fetchOffersPage(1)).slice(0, 10);
+    for (let i = 0; i < offersToSend.length; i++) {
+      const offer = offersToSend[i];
+      const msg =
+`🔥 *${offer.productName}*
+💰 Por: *${offer.priceMin}* Até: *${offer.priceMax}*
+🛒 [Link da oferta](${offer.offerLink})`;
+      await bot.sendMessage(CHAT_ID, msg, { parse_mode: "Markdown" });
+      await new Promise(r => setTimeout(r, 3000)); // 3 segundos entre cada
+    }
     res.json({ sent: offersToSend.length });
   } catch (err) {
     console.log("Erro ao enviar para o Telegram:", err);
     res.status(500).json({ error: "Erro ao enviar para o Telegram" });
   }
 });
+
 // AutoPush: envia 10 ofertas a cada 30 minutos
 const PUSH_INTERVAL_MINUTES = 30;
 const OFFERS_PER_PUSH = 10;
@@ -112,12 +111,15 @@ const DELAY_BETWEEN_OFFERS_MS = 3000; // 3 segundos
 
 async function sendOffersToTelegram() {
   try {
-    const offers = await fetchOffersPage(1); // pega a primeira página
+    const offers = await fetchOffersPage(1);
     const offersToSend = offers.slice(0, OFFERS_PER_PUSH);
 
     for (const offer of offersToSend) {
-      const msg = `${offer.productName}\nPreço: ${offer.priceMin}\nLink: ${offer.offerLink}`;
-      await bot.sendMessage(CHAT_ID, msg);
+      const msg =
+`🔥 *${offer.productName}*
+💰 Por: *${offer.priceMin}* Até: *${offer.priceMax}*
+🛒 [Link da oferta](${offer.offerLink})`;
+      await bot.sendMessage(CHAT_ID, msg, { parse_mode: "Markdown" });
       await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_OFFERS_MS));
     }
 
@@ -130,7 +132,7 @@ async function sendOffersToTelegram() {
 // Chama a função de push a cada 30 minutos
 setInterval(sendOffersToTelegram, PUSH_INTERVAL_MINUTES * 60 * 1000);
 
-// Opcional: envia logo que o servidor inicia
+// Envia uma vez logo ao iniciar
 sendOffersToTelegram();
 
 // Start server
