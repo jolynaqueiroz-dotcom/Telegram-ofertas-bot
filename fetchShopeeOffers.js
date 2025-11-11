@@ -4,7 +4,8 @@ import axios from "axios";
 import crypto from "crypto";
 import TelegramBot from "node-telegram-bot-api";
 
-const bot = new TelegramBot(process.env.TELEGRAM_TOKEN);
+// Corrigido para bater com a variável que você salvou no Render
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const app = express();
@@ -89,9 +90,13 @@ app.get("/push", async (req, res) => {
   try {
     const offersToSend = await fetchOffersPage(1); // ou todas as páginas que quiser
     await Promise.all(
-      offersToSend.map(offer => {
-        const msg = `${offer.productName}\nPreço: ${offer.priceMin}\nLink: ${offer.offerLink}`;
-        return bot.sendMessage(CHAT_ID, msg);
+      offersToSend.map(async offer => {
+        try {
+          const msg = `${offer.productName}\nPreço: ${offer.priceMin}\nLink: ${offer.offerLink}`;
+          await bot.sendMessage(CHAT_ID, msg);
+        } catch (err) {
+          console.log(`Erro enviando ${offer.productName}:`, err.message);
+        }
       })
     );
     res.json({ sent: offersToSend.length });
