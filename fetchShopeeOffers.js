@@ -105,6 +105,33 @@ app.get("/push", async (req, res) => {
     res.status(500).json({ error: "Erro ao enviar para o Telegram" });
   }
 });
+// AutoPush: envia 10 ofertas a cada 30 minutos
+const PUSH_INTERVAL_MINUTES = 30;
+const OFFERS_PER_PUSH = 10;
+const DELAY_BETWEEN_OFFERS_MS = 3000; // 3 segundos
+
+async function sendOffersToTelegram() {
+  try {
+    const offers = await fetchOffersPage(1); // pega a primeira página
+    const offersToSend = offers.slice(0, OFFERS_PER_PUSH);
+
+    for (const offer of offersToSend) {
+      const msg = `${offer.productName}\nPreço: ${offer.priceMin}\nLink: ${offer.offerLink}`;
+      await bot.sendMessage(CHAT_ID, msg);
+      await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_OFFERS_MS));
+    }
+
+    console.log(`[AutoPush] Enviadas ${offersToSend.length} ofertas para o Telegram.`);
+  } catch (err) {
+    console.log("Erro no AutoPush:", err);
+  }
+}
+
+// Chama a função de push a cada 30 minutos
+setInterval(sendOffersToTelegram, PUSH_INTERVAL_MINUTES * 60 * 1000);
+
+// Opcional: envia logo que o servidor inicia
+sendOffersToTelegram();
 
 // Start server
 app.listen(PORT, "0.0.0.0", () => {
