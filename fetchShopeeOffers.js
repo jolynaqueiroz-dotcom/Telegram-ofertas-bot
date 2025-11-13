@@ -88,7 +88,7 @@ async function generateGeminiCaption(productName) {
 async function formatOfferMessage(offer) {
   const caption = await generateGeminiCaption(offer.productName);
   return `🔥 *${caption}*
-De: ~~${offer.priceMax}~~
+De: ${offer.priceMax}
 Por: *${offer.priceMin}*
 🛒 [Link da oferta](${offer.offerLink})`;
 }
