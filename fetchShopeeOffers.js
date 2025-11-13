@@ -17,6 +17,9 @@ const PAYLOAD_ENV = process.env.PAYLOAD_SHOPEE || null;
 const APP_ID = process.env.SHOPEE_APP_ID || "";
 const APP_SECRET = process.env.SHOPEE_APP_SECRET || "";
 
+// Para evitar ofertas repetidas
+const sentOffers = new Set();
+
 function sha256Hex(s) {
   return crypto.createHash("sha256").update(s, "utf8").digest("hex");
 }
@@ -37,7 +40,7 @@ function makePayloadForPage(page) {
   }
   return {
     query:
-      "query productOfferV2($keyword: String,$limit: Int,$page: Int){productOfferV2(keyword:$keyword,limit:$limit,page:$page){nodes{productName imageUrl offerLink priceMin priceMax shopId}pageInfo{hasNextPage}}}",
+      "query productOfferV2($keyword: String,$limit: Int,$page: Int){productOfferV2(keyword:$keyword,limit:$limit,page:$page){nodes{productName imageUrl videoUrl offerLink priceMin priceMax shopId}pageInfo{hasNextPage}}}",
     variables: { keyword: "", limit: 30, page },
   };
 }
@@ -64,6 +67,32 @@ async function fetchOffersPage(page) {
   return offersPage;
 }
 
+// Função para chamar o Gemini e gerar uma legenda melhor
+async function generateGeminiCaption(productName) {
+  try {
+    if (!process.env.GEMINI_API_KEY) return productName;
+    // Exemplo de chamada Gemini (simulação, substitua com endpoint real)
+    const resp = await axios.post(
+      "https://api.gemini.example.com/generate",
+      { prompt: `Crie uma legenda curta e persuasiva para: ${productName}` },
+      { headers: { "Authorization": `Bearer ${process.env.GEMINI_API_KEY}` } }
+    );
+    return resp.data?.text || productName;
+  } catch (err) {
+    console.log("Erro Gemini, usando nome do produto:", err?.message || err);
+    return productName;
+  }
+}
+
+// Formata mensagem com preço e link clicável
+async function formatOfferMessage(offer) {
+  const caption = await generateGeminiCaption(offer.productName);
+  return `🔥 *${caption}*
+De: ~~${offer.priceMax}~~
+Por: *${offer.priceMin}*
+🛒 [Link da oferta](${offer.offerLink})`;
+}
+
 // Health check
 app.get("/", (req, res) => {
   res.send(`ok - pid=${process.pid} PORT=${PORT}`);
@@ -84,19 +113,37 @@ app.get("/fetch", async (req, res) => {
   }
 });
 
-// Endpoint que envia ofertas para o Telegram
+// Envia ofertas para o Telegram
+async function pushOffersToTelegram(offers) {
+  for (const offer of offers) {
+    if (sentOffers.has(offer.offerLink)) continue; // pula ofertas repetidas
+    sentOffers.add(offer.offerLink);
+
+    const msg = await formatOfferMessage(offer);
+
+    try {
+      // Envia vídeo se tiver, senão imagem
+      if (offer.videoUrl) {
+        await bot.sendVideo(CHAT_ID, offer.videoUrl, { caption: msg, parse_mode: "Markdown" });
+      } else if (offer.imageUrl) {
+        await bot.sendPhoto(CHAT_ID, offer.imageUrl, { caption: msg, parse_mode: "Markdown" });
+      } else {
+        await bot.sendMessage(CHAT_ID, msg, { parse_mode: "Markdown" });
+      }
+
+      // Delay de 3 segundos entre cada oferta
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    } catch (err) {
+      console.log("Erro ao enviar oferta para Telegram:", err);
+    }
+  }
+}
+
+// Endpoint /push
 app.get("/push", async (req, res) => {
   try {
     const offersToSend = (await fetchOffersPage(1)).slice(0, 10);
-    for (let i = 0; i < offersToSend.length; i++) {
-      const offer = offersToSend[i];
-      const msg =
-`🔥 *${offer.productName}*
-💰 Por: *${offer.priceMin}* Até: *${offer.priceMax}*
-🛒 [Link da oferta](${offer.offerLink})`;
-      await bot.sendMessage(CHAT_ID, msg, { parse_mode: "Markdown" });
-      await new Promise(r => setTimeout(r, 3000)); // 3 segundos entre cada
-    }
+    await pushOffersToTelegram(offersToSend);
     res.json({ sent: offersToSend.length });
   } catch (err) {
     console.log("Erro ao enviar para o Telegram:", err);
@@ -104,25 +151,21 @@ app.get("/push", async (req, res) => {
   }
 });
 
-// AutoPush: envia 10 ofertas a cada 30 minutos
+// AutoPush: envia ofertas automaticamente
 const PUSH_INTERVAL_MINUTES = 30;
 const OFFERS_PER_PUSH = 10;
-const DELAY_BETWEEN_OFFERS_MS = 3000; // 3 segundos
+const DELAY_BETWEEN_OFFERS_MS = 3000;
 
 async function sendOffersToTelegram() {
   try {
-    const offers = await fetchOffersPage(1);
-    const offersToSend = offers.slice(0, OFFERS_PER_PUSH);
-
-    for (const offer of offersToSend) {
-      const msg =
-`🔥 *${offer.productName}*
-💰 Por: *${offer.priceMin}* Até: *${offer.priceMax}*
-🛒 [Link da oferta](${offer.offerLink})`;
-      await bot.sendMessage(CHAT_ID, msg, { parse_mode: "Markdown" });
-      await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_OFFERS_MS));
+    const allPages = [];
+    for (let page = 1; page <= 3; page++) {
+      const pageOffers = await fetchOffersPage(page);
+      allPages.push(...pageOffers);
     }
-
+    const uniqueOffers = allPages.filter(offer => !sentOffers.has(offer.offerLink));
+    const offersToSend = uniqueOffers.slice(0, OFFERS_PER_PUSH);
+    await pushOffersToTelegram(offersToSend);
     console.log(`[AutoPush] Enviadas ${offersToSend.length} ofertas para o Telegram.`);
   } catch (err) {
     console.log("Erro no AutoPush:", err);
@@ -132,7 +175,7 @@ async function sendOffersToTelegram() {
 // Chama a função de push a cada 30 minutos
 setInterval(sendOffersToTelegram, PUSH_INTERVAL_MINUTES * 60 * 1000);
 
-// Envia uma vez logo ao iniciar
+// Envia uma vez ao iniciar
 sendOffersToTelegram();
 
 // Start server
