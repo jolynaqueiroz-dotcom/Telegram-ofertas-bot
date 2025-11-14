@@ -1,5 +1,5 @@
 // fetchShopeeOffers.js
-// Node ESM - completo com priorização Black Friday / cupom / desconto
+// Node ESM - completo (mantém funcionalidades existentes + SHOPEE_KEYWORDS + OPENAI)
 import express from "express";
 import axios from "axios";
 import crypto from "crypto";
@@ -28,7 +28,8 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 if (!botToken) console.warn("AVISO: TELEGRAM_BOT_TOKEN não definido (mensagens não serão enviadas).");
 if (!CHAT_ID) console.warn("AVISO: TELEGRAM_CHAT_ID não definido (mensagens não serão enviadas).");
 
-const bot = botToken ? new TelegramBot(botToken) : null;
+// create bot object only if token exists
+const bot = botToken ? new TelegramBot(botToken, { polling: false }) : null;
 
 const app = express();
 app.use(express.json());
@@ -46,6 +47,9 @@ const DELAY_BETWEEN_OFFERS_MS = Number(process.env.DELAY_BETWEEN_OFFERS_MS || 30
 // arquivo local para persistir dedupe entre reboots
 const SENT_FILE = path.resolve("./sent_offers.json");
 let sentOffers = new Set();
+
+// Hardcoded default keywords (will be used only if no env variables provided)
+const HARDCODED_DEFAULT_SHOPEE_KEYWORDS = `Moda feminina, moda masculina, moda infantil, casa e construção, mamãe e bebê, eletrodomésticos, eletroportáteis, automóveis, beleza, natal, suplementos, brinquedos, sapatos femininos, sapatos masculinos, sapatos infantil, acessórios, móveis, utensílios de cozinha, lavanderia, sala, quarto, cozinha, banheiro, celulares, relógios, fones de ouvido, computadores, smart tvs, máquinas de lavar, Air Fryers, micro-ondas, lava louças, geladeiras, armários de cozinha, buffett, cristaleiras, louças, jogos de jantar, copos, taças, pratos, jogos americanos, potes herméticos, itens de natal, comidas, produtos de limpeza, viagens e lazer, painéis de tvs, mesas de jantar, sofás, poltronas, camas, toalhas, panos de prato, colchas, edredons, colchões, skincare, itens cama posta solteiro e casal, tablets, microfones, suportes para celular, cortinas, jogo de cama, guarda-roupas, talheres, Black Friday, ferramentas, escritório, caixas organizadoras`.trim();
 
 async function loadSentOffers() {
   try {
@@ -190,17 +194,17 @@ function prioritizeOffers(offers) {
     }
   }
 
-  const sortDesc = arr => arr.sort((a,b) => (b.discountScore||0) - (a.discountScore||0));
+  const sortDesc = (arr) => arr.sort((a, b) => (b.discountScore || 0) - (a.discountScore || 0));
 
   sortDesc(bf);
   sortDesc(coupon);
   sortDesc(withDiscount);
 
   const ordered = [
-    ...bf.map(x => x.off),
-    ...coupon.map(x => x.off),
-    ...withDiscount.map(x => x.off),
-    ...rest.map(x => x.off),
+    ...bf.map((x) => x.off),
+    ...coupon.map((x) => x.off),
+    ...withDiscount.map((x) => x.off),
+    ...rest.map((x) => x.off),
   ];
 
   const seen = new Set();
@@ -244,22 +248,16 @@ async function generateOpenAICaption(productName) {
   }
 }
 
-// ------ DEFAULT SHOPEE_KEYWORDS (fallback hardcoded que você me enviou) ------
-const DEFAULT_SHOPEE_KEYWORDS = `
-Moda feminina, moda masculina, moda infantil, casa e construção, mamãe e bebê, eletrodomésticos, eletroportáteis, automóveis, beleza, natal, suplementos, brinquedos, sapatos femininos, sapatos masculinos, sapatos infantil, acessórios, móveis, utensílios de cozinha, lavanderia, sala, quarto, cozinha, banheiro, celulares, relógios, fones de ouvido, computadores, smart tvs, máquinas de lavar, Air Fryers, micro-ondas, lava louças, geladeiras, armários de cozinha, buffett, cristaleiras, louças, jogos de jantar, copos, taças, pratos, jogos americanos, potes herméticos, itens de natal, comidas, produtos de limpeza, viagens e lazer, painéis de tvs, mesas de jantar, sofás, poltronas, camas, toalhas, panos de prato, colchas, edredons, colchões, skincare, itens cama posta solteiro e casal, tablets, microfones, suportes para celular, cortinas, jogo de cama, guarda-roupas, talheres, Black Friday, ferramentas, escritório, caixas organizadoras
-`.trim();
-// ---------------------------------------------------------------------------
-
 async function formatOfferMessage(offer) {
   const caption = await generateOpenAICaption(offer.productName || "");
-  const coupon =
-    offer.couponLink || offer.coupon_url || offer.coupon || offer.couponCode || null;
+  const coupon = offer.couponLink || offer.coupon_url || offer.coupon || offer.couponCode || null;
 
   const isBF = isBlackFridayOffer(offer);
   let header = "";
   if (isBF) header = "🔥 *OFERTA BLACK FRIDAY!* \n";
   else if (coupon) header = "🔥 *OFERTA RELÂMPAGO — COM CUPOM!* \n";
 
+  // NOTE: não usar strikethrough pra "De:" (você pediu pra tirar o riscado)
   let msg = `${header}*${caption}*\nDe: ${offer.priceMax}\nPor: *${offer.priceMin}*`;
   if (coupon) msg += `\n🎟️ [Cupons desconto](${coupon})`;
   msg += `\n🛒 [Link da oferta](${offer.offerLink})`;
@@ -273,9 +271,9 @@ app.get("/", (req, res) => {
 
 app.get("/fetch", async (req, res) => {
   try {
-    // prefer SHOPEE_KEYWORDS env, fallback KEYWORDS env, fallback DEFAULT_SHOPEE_KEYWORDS
-    const envKeys = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
-    const keywordsEnv = envKeys || DEFAULT_SHOPEE_KEYWORDS;
+    // prefer SHOPEE_KEYWORDS env, fallback KEYWORDS env, fallback HARDCODED_DEFAULT_SHOPEE_KEYWORDS
+    const envKeysRaw = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
+    const keywordsEnv = envKeysRaw || HARDCODED_DEFAULT_SHOPEE_KEYWORDS;
     const keywords = keywordsEnv
       .split(",")
       .map((k) => k.trim())
@@ -294,6 +292,7 @@ async function pushOffersToTelegram(offers) {
   for (const offer of offers) {
     const uniqueKey = `${offer.offerLink || offer.imageUrl || offer.productName}::${offer.shopId || ""}`;
     if (sentOffers.has(uniqueKey)) continue;
+    // marca imediatamente pra evitar race conditions
     sentOffers.add(uniqueKey);
     await saveSentOffers();
 
@@ -304,6 +303,7 @@ async function pushOffersToTelegram(offers) {
         console.log("Bot não configurado — mensagem pronta:", msg);
       } else {
         if (offer.videoUrl) {
+          // envia vídeo se existir
           await bot.sendVideo(CHAT_ID, offer.videoUrl, { caption: msg, parse_mode: "Markdown" });
         } else if (offer.imageUrl) {
           await bot.sendPhoto(CHAT_ID, offer.imageUrl, { caption: msg, parse_mode: "Markdown" });
@@ -320,8 +320,8 @@ async function pushOffersToTelegram(offers) {
 
 app.get("/push", async (req, res) => {
   try {
-    const envKeys = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
-    const keywordsEnv = envKeys || DEFAULT_SHOPEE_KEYWORDS;
+    const envKeysRaw = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
+    const keywordsEnv = envKeysRaw || HARDCODED_DEFAULT_SHOPEE_KEYWORDS;
     const keywords = keywordsEnv
       .split(",")
       .map((k) => k.trim())
@@ -340,8 +340,8 @@ app.get("/push", async (req, res) => {
 // AutoPush rotineiro
 async function sendOffersToTelegram() {
   try {
-    const envKeys = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
-    const keywordsEnv = envKeys || DEFAULT_SHOPEE_KEYWORDS;
+    const envKeysRaw = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
+    const keywordsEnv = envKeysRaw || HARDCODED_DEFAULT_SHOPEE_KEYWORDS;
     const keywords = keywordsEnv
       .split(",")
       .map((k) => k.trim())
