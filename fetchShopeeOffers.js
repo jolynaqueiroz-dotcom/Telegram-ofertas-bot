@@ -14,7 +14,8 @@ import TelegramBot from "node-telegram-bot-api";
  * - SHOPEE_APP_ID
  * - SHOPEE_APP_SECRET
  * - PAYLOAD_SHOPEE (opcional JSON string)
- * - KEYWORDS (opcional, csv: "geladeira,fogao,smart tv")
+ * - SHOPEE_KEYWORDS (opcional, csv grande)
+ * - KEYWORDS (opcional, csv - fallback se SHOPEE_KEYWORDS não existir)
  * - OPENAI_API_KEY (opcional: para legendas melhores via OpenAI)
  * - OFFERS_PER_PUSH (opcional, default 10)
  * - PUSH_INTERVAL_MINUTES (opcional, default 30)
@@ -142,24 +143,25 @@ async function fetchOffersAllPages(keywords = []) {
   return Array.from(map.values());
 }
 
-// OpenAI caption (se OPENAI_API_KEY estiver definido)
+// OpenAI (GPT) caption (se OPENAI_API_KEY estiver definido)
 async function generateOpenAICaption(productName) {
   try {
     const key = process.env.OPENAI_API_KEY;
     if (!key) return productName;
 
+    // usa gpt-4.1-mini conforme solicitado (se disponível na sua conta)
     const prompt = `Escreva uma legenda curta, persuasiva e natural para divulgar este produto em um grupo de ofertas no Telegram. Produto: ${productName}\nResponda em 1-2 linhas, linguagem coloquial, sem emojis adicionais.`;
     const resp = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
-        model: "gpt-3.5-turbo",
+        model: "gpt-4.1-mini",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 60,
-        temperature: 0.7,
+        max_tokens: 80,
+        temperature: 0.8,
       },
       {
         headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        timeout: 10000,
+        timeout: 12000,
       }
     );
     const text = resp.data?.choices?.[0]?.message?.content;
@@ -188,7 +190,8 @@ app.get("/", (req, res) => {
 
 app.get("/fetch", async (req, res) => {
   try {
-    const keywordsEnv = process.env.KEYWORDS || "";
+    // prefer SHOPEE_KEYWORDS, fallback para KEYWORDS
+    const keywordsEnv = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
     const keywords = keywordsEnv
       .split(",")
       .map((k) => k.trim())
@@ -233,7 +236,7 @@ async function pushOffersToTelegram(offers) {
 
 app.get("/push", async (req, res) => {
   try {
-    const keywordsEnv = process.env.KEYWORDS || "";
+    const keywordsEnv = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
     const keywords = keywordsEnv
       .split(",")
       .map((k) => k.trim())
@@ -251,7 +254,7 @@ app.get("/push", async (req, res) => {
 // AutoPush rotineiro
 async function sendOffersToTelegram() {
   try {
-    const keywordsEnv = process.env.KEYWORDS || "";
+    const keywordsEnv = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
     const keywords = keywordsEnv
       .split(",")
       .map((k) => k.trim())
