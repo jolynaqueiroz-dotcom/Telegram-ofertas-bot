@@ -1,5 +1,5 @@
 // fetchShopeeOffers.js
-// Node ESM - dedupe preferencial por imagem (image hash), com fallback por link/nome
+// Node ESM - completo com dedupe por imagem, priorização e persistência
 import express from "express";
 import axios from "axios";
 import crypto from "crypto";
@@ -15,12 +15,11 @@ import TelegramBot from "node-telegram-bot-api";
  * - SHOPEE_APP_SECRET
  * - PAYLOAD_SHOPEE (opcional JSON string)
  * - SHOPEE_KEYWORDS (opcional, csv grande)
- * - KEYWORDS (opcional, csv - fallback)
+ * - KEYWORDS (opcional, csv - fallback se SHOPEE_KEYWORDS não existir)
  * - OPENAI_API_KEY (opcional: para legendas melhores via OpenAI)
  * - OFFERS_PER_PUSH (opcional, default 10)
  * - PUSH_INTERVAL_MINUTES (opcional, default 30)
  * - DELAY_BETWEEN_OFFERS_MS (opcional, default 3000)
- * - IMAGE_FETCH_TIMEOUT_MS (opcional, default 7000)
  */
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -43,211 +42,66 @@ const APP_SECRET = process.env.SHOPEE_APP_SECRET || "";
 const OFFERS_PER_PUSH = Number(process.env.OFFERS_PER_PUSH || 10);
 const PUSH_INTERVAL_MINUTES = Number(process.env.PUSH_INTERVAL_MINUTES || 30);
 const DELAY_BETWEEN_OFFERS_MS = Number(process.env.DELAY_BETWEEN_OFFERS_MS || 3000);
-const IMAGE_FETCH_TIMEOUT_MS = Number(process.env.IMAGE_FETCH_TIMEOUT_MS || 7000);
 
 // arquivo local para persistir dedupe entre reboots
 const SENT_FILE = path.resolve("./sent_offers.json");
-// estrutura: { "<uniqueKey>": { sentAt: 169..., lastPriceMin: "19.99", nameHash: "...", imageHash: "..." }, ... }
-let sentOffers = {}; // objeto em memória
+let sentOffers = new Set();
 
 async function loadSentOffers() {
   try {
     const data = await fs.readFile(SENT_FILE, "utf8");
-    sentOffers = JSON.parse(data || "{}");
-    console.log(`Loaded ${Object.keys(sentOffers).length} sent offers from ${SENT_FILE}`);
+    const arr = JSON.parse(data || "[]");
+    sentOffers = new Set(arr);
+    console.log(`Loaded ${arr.length} sent offers from ${SENT_FILE}`);
   } catch (e) {
-    sentOffers = {};
+    sentOffers = new Set();
     if (e.code !== "ENOENT") console.log("Não foi possível ler sent_offers.json:", e.message);
   }
 }
 
 async function saveSentOffers() {
   try {
-    await fs.writeFile(SENT_FILE, JSON.stringify(sentOffers, null, 2), "utf8");
+    await fs.writeFile(SENT_FILE, JSON.stringify(Array.from(sentOffers)), "utf8");
   } catch (e) {
     console.log("Erro salvando sent_offers.json:", e.message);
   }
 }
 
-// util sha256
-function sha256HexStr(s) {
-  return crypto.createHash("sha256").update(String(s || ""), "utf8").digest("hex");
+// util
+function sha256Hex(s) {
+  return crypto.createHash("sha256").update(s, "utf8").digest("hex");
 }
 
-// canonicalize URL: retira query string e hash, deixa origin + pathname (remove trailing slash)
-function canonicalizeUrl(raw) {
-  if (!raw) return null;
+// Normaliza URL removendo query string e hash (útil para dedupe por link/imagem)
+function normalizeUrlNoQuery(u) {
+  if (!u || typeof u !== "string") return null;
   try {
-    let u = raw.trim();
-    if (!u.startsWith("http://") && !u.startsWith("https://")) {
-      u = "https://" + u.replace(/^\/+/, "");
-    }
-    const parsed = new URL(u);
-    return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, "");
+    const url = new URL(u);
+    return `${url.origin}${url.pathname}`; // sem query, sem hash
   } catch (e) {
-    return raw.replace(/\?.*$/, "").replace(/#.*$/, "").trim();
+    // se não for URL completa (às vezes vem como caminho parcial), tenta manual
+    const qIdx = u.indexOf("?");
+    const sharpIdx = u.indexOf("#");
+    let end = u.length;
+    if (qIdx !== -1) end = Math.min(end, qIdx);
+    if (sharpIdx !== -1) end = Math.min(end, sharpIdx);
+    return u.slice(0, end);
   }
 }
 
-// Normalize name
-function normalizeName(name, maxWords = 12) {
-  if (!name) return "";
-  const withoutAccents = name.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const alpha = withoutAccents.replace(/[^0-9a-zA-Z\s]/g, " ");
-  const parts = alpha
-    .split(/\s+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .slice(0, maxWords);
-  return parts.join(" ").toLowerCase();
+// chave única para dedupe: PRIORIDADE -> imageUrl (normalizada) -> offerLink (normalizada) -> productName::shopId
+function makeUniqueKey(offer) {
+  const img = offer.imageUrl ? normalizeUrlNoQuery(offer.imageUrl) : null;
+  if (img) return `img::${img}`;
+
+  const link = offer.offerLink ? normalizeUrlNoQuery(offer.offerLink) : null;
+  if (link) return `link::${link}`;
+
+  const name = (offer.productName || "").trim().replace(/\s+/g, " ");
+  const shop = offer.shopId || "";
+  return `name::${name}::${shop}`;
 }
 
-// nameHash (nome normalizado + shopId)
-function computeNameHash(offer) {
-  const shop = offer?.shopId || offer?.shop_id || "";
-  const nm = normalizeName(offer?.productName || offer?.product_name || "", 12);
-  return sha256HexStr(`NAME:${nm}::S:${shop}`);
-}
-
-// image hash cache (em memória) - persistiremos via sentOffers entries (cada item pode ter imageHash)
-const imageHashCache = new Map();
-
-// baixa a imagem e calcula sha256 dos bytes (retorna string hex) - timeout e erros tratados
-async function getImageHash(url) {
-  if (!url) return null;
-  try {
-    const canon = canonicalizeUrl(url);
-    if (imageHashCache.has(canon)) return imageHashCache.get(canon);
-
-    const resp = await axios.get(canon, {
-      responseType: "arraybuffer",
-      timeout: IMAGE_FETCH_TIMEOUT_MS,
-      maxContentLength: 5 * 1024 * 1024, // 5MB cap
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)" },
-    });
-    const buf = Buffer.from(resp.data);
-    const h = sha256HexStr(buf);
-    imageHashCache.set(canon, h);
-    return h;
-  } catch (err) {
-    // falha no download -> retorna null (seguimos com fallback)
-    // console.log("getImageHash error:", err?.message || err);
-    return null;
-  }
-}
-
-// computeUniqueKey: prefere imageHash -> canonical offer link -> canonical image url -> nameHash
-async function computeUniqueKey(offer) {
-  // tenta image hash primeiro (assincronamente)
-  const image = offer?.imageUrl || offer?.image_url || null;
-  if (image) {
-    const iHash = await getImageHash(image);
-    if (iHash) return `I:${iHash}::S:${offer?.shopId || offer?.shop_id || ""}`;
-  }
-
-  const link = offer?.offerLink || offer?.offer_link || offer?.offer_url || null;
-  if (link) {
-    const canon = canonicalizeUrl(link);
-    return `L:${sha256HexStr(canon)}::S:${offer?.shopId || offer?.shop_id || ""}`;
-  }
-
-  // fallback image canonical url hashed
-  if (image) {
-    const canonImg = canonicalizeUrl(image);
-    return `ImgUrl:${sha256HexStr(canonImg)}::S:${offer?.shopId || offer?.shop_id || ""}`;
-  }
-
-  // por fim, nameHash
-  const nameHash = computeNameHash(offer);
-  return `N:${nameHash}`;
-}
-
-// procura uma entry existente por nameHash (retorna uniqueKey ou null)
-function findExistingKeyByNameHash(nameHash) {
-  for (const k of Object.keys(sentOffers)) {
-    if (sentOffers[k] && sentOffers[k].nameHash === nameHash) return k;
-  }
-  return null;
-}
-
-// parsePrice
-function parsePrice(val) {
-  if (val == null) return null;
-  const s = String(val).replace(/\s/g, "");
-  const cleaned = s.replace(/[^\d.,]/g, "").replace(/\.(?=\d{3,})/g, "");
-  const normalized = cleaned.replace(",", ".");
-  const n = Number(normalized);
-  return Number.isFinite(n) ? n : null;
-}
-
-function computeDiscountScore(offer) {
-  const max = parsePrice(offer.priceMax);
-  const min = parsePrice(offer.priceMin);
-  if (max && min && max > min) {
-    return ((max - min) / max) * 100;
-  }
-  return 0;
-}
-
-function isBlackFridayOffer(offer) {
-  const name = (offer.productName || "").toLowerCase();
-  return name.includes("black") || name.includes("black friday");
-}
-
-function prioritizeOffers(offers) {
-  const map = new Map();
-  for (const off of offers) {
-    const key = JSON.stringify([off.offerLink || off.imageUrl || off.productName, off.shopId || ""]);
-    if (!map.has(key)) map.set(key, off);
-  }
-  const uniq = Array.from(map.values());
-
-  const bf = [];
-  const coupon = [];
-  const withDiscount = [];
-  const rest = [];
-
-  for (const off of uniq) {
-    const hasCoupon = Boolean(off.couponLink || off.coupon_url || off.coupon || off.couponCode);
-    const discountScore = computeDiscountScore(off);
-    if (isBlackFridayOffer(off)) {
-      bf.push({ off, discountScore, hasCoupon });
-    } else if (hasCoupon) {
-      coupon.push({ off, discountScore, hasCoupon });
-    } else if (discountScore > 0) {
-      withDiscount.push({ off, discountScore, hasCoupon });
-    } else {
-      rest.push({ off, discountScore, hasCoupon });
-    }
-  }
-
-  const sortDesc = (arr) => arr.sort((a, b) => (b.discountScore || 0) - (a.discountScore || 0));
-
-  sortDesc(bf);
-  sortDesc(coupon);
-  sortDesc(withDiscount);
-
-  const ordered = [
-    ...bf.map((x) => x.off),
-    ...coupon.map((x) => x.off),
-    ...withDiscount.map((x) => x.off),
-    ...rest.map((x) => x.off),
-  ];
-
-  // garantir unicidade por chave calculada simples (link/image/name)
-  const seen = new Set();
-  const final = [];
-  for (const o of ordered) {
-    const k = JSON.stringify([o.offerLink || o.imageUrl || o.productName, o.shopId || ""]);
-    if (!seen.has(k)) {
-      seen.add(k);
-      final.push(o);
-    }
-  }
-  return final;
-}
-
-// Shopee fetch helpers
 function makePayloadForPage(page, keyword = "") {
   if (PAYLOAD_ENV) {
     try {
@@ -279,7 +133,7 @@ async function fetchOffersPage(page = 1, keyword = "") {
 
     const timestamp = Math.floor(Date.now() / 1000);
     const signFactor = `${APP_ID}${timestamp}${payloadStr}${APP_SECRET}`;
-    const signature = sha256HexStr(signFactor);
+    const signature = sha256Hex(signFactor);
 
     const headers = {
       "Content-Type": "application/json",
@@ -301,6 +155,7 @@ async function fetchOffersPage(page = 1, keyword = "") {
   return offersPage;
 }
 
+// Busca várias páginas e keywords, já deduplicando por chave única
 async function fetchOffersAllPages(keywords = []) {
   const pagesToCheck = [1, 2, 3];
   const map = new Map();
@@ -310,7 +165,7 @@ async function fetchOffersAllPages(keywords = []) {
     for (const p of pagesToCheck) {
       const pageOffers = await fetchOffersPage(p, kw);
       for (const off of pageOffers) {
-        const key = JSON.stringify([off.offerLink || off.imageUrl || off.productName, off.shopId || ""]);
+        const key = makeUniqueKey(off);
         if (!map.has(key)) map.set(key, off);
       }
     }
@@ -318,7 +173,98 @@ async function fetchOffersAllPages(keywords = []) {
   return Array.from(map.values());
 }
 
-// OpenAI caption (opcional)
+// ---------- Prioritização (Black Friday, cupom, maior desconto) ----------
+function parsePrice(val) {
+  if (val == null) return null;
+  const n = Number(String(val).replace(/[^\d.,]/g, "").replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+
+function computeDiscountScore(offer) {
+  const max = parsePrice(offer.priceMax);
+  const min = parsePrice(offer.priceMin);
+  if (max && min && max > min) {
+    return ((max - min) / max) * 100;
+  }
+  return 0;
+}
+
+function isBlackFridayOffer(offer) {
+  const name = (offer.productName || "").toLowerCase();
+  return name.includes("black") || name.includes("black friday");
+}
+
+// Fisher-Yates shuffle (embaralha in-place)
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function prioritizeOffers(offers) {
+  // garante unicidade por chave (novamente)
+  const map = new Map();
+  for (const off of offers) {
+    const key = makeUniqueKey(off);
+    if (!map.has(key)) map.set(key, off);
+  }
+  const uniq = Array.from(map.values());
+
+  const bf = [];
+  const coupon = [];
+  const withDiscount = [];
+  const rest = [];
+
+  for (const off of uniq) {
+    const hasCoupon = Boolean(off.couponLink || off.coupon_url || off.coupon || off.couponCode);
+    const discountScore = computeDiscountScore(off);
+    if (isBlackFridayOffer(off)) {
+      bf.push({ off, discountScore, hasCoupon });
+    } else if (hasCoupon) {
+      coupon.push({ off, discountScore, hasCoupon });
+    } else if (discountScore > 0) {
+      withDiscount.push({ off, discountScore, hasCoupon });
+    } else {
+      rest.push({ off, discountScore, hasCoupon });
+    }
+  }
+
+  const sortDescByScore = arr => arr.sort((a,b) => (b.discountScore||0) - (a.discountScore||0));
+
+  sortDescByScore(bf);
+  sortDescByScore(coupon);
+  sortDescByScore(withDiscount);
+
+  // embaralha dentro de cada grupo (para evitar sempre os mesmos elementos no topo)
+  const bfShuffled = shuffleArray(bf.map(x=>x.off));
+  const couponShuffled = shuffleArray(coupon.map(x=>x.off));
+  const withDiscountShuffled = shuffleArray(withDiscount.map(x=>x.off));
+  const restShuffled = shuffleArray(rest.map(x=>x.off));
+
+  const ordered = [
+    ...bfShuffled,
+    ...couponShuffled,
+    ...withDiscountShuffled,
+    ...restShuffled,
+  ];
+
+  // garante unicidade final (por via das dúvidas)
+  const seen = new Set();
+  const final = [];
+  for (const o of ordered) {
+    const k = makeUniqueKey(o);
+    if (!seen.has(k)) {
+      seen.add(k);
+      final.push(o);
+    }
+  }
+  return final;
+}
+// -------------------------------------------------------------------------
+
+// OpenAI (GPT) caption (se OPENAI_API_KEY estiver definido)
 async function generateOpenAICaption(productName) {
   try {
     const key = process.env.OPENAI_API_KEY;
@@ -348,7 +294,8 @@ async function generateOpenAICaption(productName) {
 
 async function formatOfferMessage(offer) {
   const caption = await generateOpenAICaption(offer.productName || "");
-  const coupon = offer.couponLink || offer.coupon_url || offer.coupon || offer.couponCode || null;
+  const coupon =
+    offer.couponLink || offer.coupon_url || offer.coupon || offer.couponCode || null;
 
   const isBF = isBlackFridayOffer(offer);
   let header = "";
@@ -368,12 +315,12 @@ app.get("/", (req, res) => {
 
 app.get("/fetch", async (req, res) => {
   try {
+    // prefer SHOPEE_KEYWORDS env, fallback KEYWORDS env, fallback empty
     const envKeys = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
     const keywordsEnv = envKeys;
     const keywords = keywordsEnv
-      .split(",")
-      .map((k) => k.trim())
-      .filter(Boolean);
+      ? keywordsEnv.split(",").map((k) => k.trim()).filter(Boolean)
+      : [""];
     const offers = await fetchOffersAllPages(keywords);
     const prioritized = prioritizeOffers(offers);
     res.json({ offers: prioritized });
@@ -383,53 +330,13 @@ app.get("/fetch", async (req, res) => {
   }
 });
 
-// push util com persistência de identidade (imageHash/nameHash)
+// envio util com persistência
 async function pushOffersToTelegram(offers) {
   for (const offer of offers) {
-    // compute a chave preferencial (tenta image hash)
-    const nameHash = computeNameHash(offer);
-    let uniqueKey;
-    // try to compute an image hash (await inside)
-    const imageUrl = offer?.imageUrl || offer?.image_url || null;
-    let imageHash = null;
-    if (imageUrl) {
-      try {
-        imageHash = await getImageHash(imageUrl);
-      } catch (e) {
-        imageHash = null;
-      }
-    }
-
-    if (imageHash) {
-      uniqueKey = `I:${imageHash}::S:${offer?.shopId || offer?.shop_id || ""}`;
-    } else if (offer?.offerLink) {
-      const canon = canonicalizeUrl(offer.offerLink);
-      uniqueKey = `L:${sha256HexStr(canon)}::S:${offer?.shopId || offer?.shop_id || ""}`;
-    } else if (imageUrl) {
-      const canonImg = canonicalizeUrl(imageUrl);
-      uniqueKey = `ImgUrl:${sha256HexStr(canonImg)}::S:${offer?.shopId || offer?.shop_id || ""}`;
-    } else {
-      uniqueKey = `N:${nameHash}`;
-    }
-
-    // se já existe algum registro com o mesmo nameHash, usa essa key pra comparar
-    const existingByName = findExistingKeyByNameHash(nameHash);
-    const useKey = existingByName || uniqueKey;
-
-    const existing = sentOffers[useKey];
-    const currentPriceMin = offer.priceMin != null ? String(offer.priceMin) : null;
-
-    if (existing) {
-      const prevPrice = existing.lastPriceMin != null ? String(existing.lastPriceMin) : null;
-      if (prevPrice === currentPriceMin) {
-        // mesma oferta (mesmo name/image/key) e mesmo preço => pular
-        continue;
-      }
-      // preço diferente => vamos enviar e atualizar
-    }
-
-    // marca antes para evitar race conditions
-    sentOffers[useKey] = { sentAt: Date.now(), lastPriceMin: currentPriceMin, nameHash, imageHash: imageHash || null };
+    const uniqueKey = makeUniqueKey(offer);
+    if (sentOffers.has(uniqueKey)) continue;
+    // marca imediatamente pra evitar race conditions
+    sentOffers.add(uniqueKey);
     await saveSentOffers();
 
     const msg = await formatOfferMessage(offer);
@@ -449,7 +356,6 @@ async function pushOffersToTelegram(offers) {
       await new Promise((r) => setTimeout(r, DELAY_BETWEEN_OFFERS_MS));
     } catch (err) {
       console.log("Erro ao enviar oferta para Telegram:", err?.message || err);
-      // mantemos a marcação para evitar spam em caso de falha repetida
     }
   }
 }
@@ -459,9 +365,8 @@ app.get("/push", async (req, res) => {
     const envKeys = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
     const keywordsEnv = envKeys;
     const keywords = keywordsEnv
-      .split(",")
-      .map((k) => k.trim())
-      .filter(Boolean);
+      ? keywordsEnv.split(",").map((k) => k.trim()).filter(Boolean)
+      : [""];
     const all = await fetchOffersAllPages(keywords);
     const prioritized = prioritizeOffers(all);
     const toSend = prioritized.slice(0, OFFERS_PER_PUSH);
@@ -479,24 +384,17 @@ async function sendOffersToTelegram() {
     const envKeys = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
     const keywordsEnv = envKeys;
     const keywords = keywordsEnv
-      .split(",")
-      .map((k) => k.trim())
-      .filter(Boolean);
+      ? keywordsEnv.split(",").map((k) => k.trim()).filter(Boolean)
+      : [""];
     const all = await fetchOffersAllPages(keywords);
     const prioritized = prioritizeOffers(all);
-    // Filtra apenas ofertas novas (ou com priceMin diferente)
-    const unique = [];
-    for (const offer of prioritized) {
-      const nameHash = computeNameHash(offer);
-      const existingKey = findExistingKeyByNameHash(nameHash);
-      if (!existingKey) {
-        unique.push(offer);
-        continue;
-      }
-      const prev = sentOffers[existingKey];
-      const prevPrice = prev?.lastPriceMin != null ? String(prev.lastPriceMin) : null;
-      if (String(offer.priceMin) !== prevPrice) unique.push(offer);
-    }
+
+    // filtra apenas ofertas não enviadas (com chave robusta)
+    const unique = prioritized.filter((offer) => {
+      const key = makeUniqueKey(offer);
+      return !sentOffers.has(key);
+    });
+
     const offersToSend = unique.slice(0, OFFERS_PER_PUSH);
     await pushOffersToTelegram(offersToSend);
     console.log(`[AutoPush] Enviadas ${offersToSend.length} ofertas para o Telegram.`);
