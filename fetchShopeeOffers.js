@@ -182,4 +182,4 @@ sendOffersToTelegram();
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Node HTTP Shopee rodando na porta ${PORT} (pid=${process.pid})`);
   console.log(`USE: GET /fetch, GET /push e GET / (health)`);
-});
+}); 
