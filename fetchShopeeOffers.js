@@ -14,7 +14,7 @@ import TelegramBot from "node-telegram-bot-api";
  * - SHOPEE_APP_ID
  * - SHOPEE_APP_SECRET
  * - PAYLOAD_SHOPEE (opcional JSON string)
- * - SHOPEE_KEYWORDS (opcional, csv grande)
+ * - SHOPEE_KEYWORDS (opcional, csv grande)  <-- preferido
  * - KEYWORDS (opcional, csv - fallback se SHOPEE_KEYWORDS não existir)
  * - OPENAI_API_KEY (opcional: para legendas melhores via OpenAI)
  * - OFFERS_PER_PUSH (opcional, default 10)
@@ -42,6 +42,17 @@ const APP_SECRET = process.env.SHOPEE_APP_SECRET || "";
 const OFFERS_PER_PUSH = Number(process.env.OFFERS_PER_PUSH || 10);
 const PUSH_INTERVAL_MINUTES = Number(process.env.PUSH_INTERVAL_MINUTES || 30);
 const DELAY_BETWEEN_OFFERS_MS = Number(process.env.DELAY_BETWEEN_OFFERS_MS || 3000);
+
+// DEFAULT_KEYWORDS usado se não houver SHOPEE_KEYWORDS nem KEYWORDS nas vars
+const DEFAULT_KEYWORDS = `Moda feminina, moda masculina, moda infantil, casa e construção, mamãe e bebê, eletrodomésticos, eletroportáteis, automóveis, beleza, natal, suplementos, brinquedos, sapatos femininos, sapatos masculinos, sapatos infantil, acessórios, móveis, utensílios de cozinha, lavanderia, sala, quarto, cozinha, banheiro, celulares, relógios, fones de ouvido, computadores, smart tvs, máquinas de lavar, Air Fryers, micro-ondas, lava louças, geladeiras, armários de cozinha, buffett, cristaleiras, louças, jogos de jantar, copos, taças, pratos, jogos americanos, potes herméticos, itens de natal, comidas, produtos de limpeza, viagens e lazer, painéis de tvs, mesas de jantar, sofás, poltronas, camas, toalhas, panos de prato, colchas, edredons, colchões, skincare, itens cama posta solteiro e casal, tablets, microfones, suportes para celular, cortinas, jogo de cama, guarda-roupas, talheres, Black Friday, ferramentas, escritório, caixas organizadoras`;
+
+function getKeywordsArray() {
+  const env = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || DEFAULT_KEYWORDS).trim();
+  return env
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
 
 // arquivo local para persistir dedupe entre reboots
 const SENT_FILE = path.resolve("./sent_offers.json");
@@ -190,12 +201,7 @@ app.get("/", (req, res) => {
 
 app.get("/fetch", async (req, res) => {
   try {
-    // prefer SHOPEE_KEYWORDS, fallback para KEYWORDS
-    const keywordsEnv = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
-    const keywords = keywordsEnv
-      .split(",")
-      .map((k) => k.trim())
-      .filter(Boolean);
+    const keywords = getKeywordsArray();
     const offers = await fetchOffersAllPages(keywords);
     res.json({ offers });
   } catch (e) {
@@ -236,11 +242,7 @@ async function pushOffersToTelegram(offers) {
 
 app.get("/push", async (req, res) => {
   try {
-    const keywordsEnv = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
-    const keywords = keywordsEnv
-      .split(",")
-      .map((k) => k.trim())
-      .filter(Boolean);
+    const keywords = getKeywordsArray();
     const all = await fetchOffersAllPages(keywords);
     const toSend = all.slice(0, OFFERS_PER_PUSH);
     await pushOffersToTelegram(toSend);
@@ -254,11 +256,7 @@ app.get("/push", async (req, res) => {
 // AutoPush rotineiro
 async function sendOffersToTelegram() {
   try {
-    const keywordsEnv = (process.env.SHOPEE_KEYWORDS || process.env.KEYWORDS || "").trim();
-    const keywords = keywordsEnv
-      .split(",")
-      .map((k) => k.trim())
-      .filter(Boolean);
+    const keywords = getKeywordsArray();
     const all = await fetchOffersAllPages(keywords);
     const unique = all.filter((offer) => {
       const key = `${offer.offerLink || offer.imageUrl || offer.productName}::${offer.shopId || ""}`;
