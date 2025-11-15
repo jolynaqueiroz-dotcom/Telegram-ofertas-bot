@@ -270,7 +270,7 @@ async function generateOpenAICaption(productName) {
     const key = process.env.OPENAI_API_KEY;
     if (!key) return productName;
 
-    const prompt = `🔥 Escreva uma legenda curta, persuasiva e natural para divulgar este produto em um grupo de ofertas no Telegram. Produto: ${productName}\nResponda em 1-2 linhas, linguagem coloquial, sem emojis adicionais.`;
+    const prompt = `Escreva uma legenda curta, persuasiva e natural para divulgar este produto em um grupo de ofertas no Telegram. Produto: ${productName}\nResponda em 1-2 linhas, linguagem coloquial, sem emojis adicionais.`;
     const resp = await axios.post(
       "https://api.openai.com/v1/chat/completions",
       {
