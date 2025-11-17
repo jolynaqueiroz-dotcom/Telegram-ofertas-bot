@@ -43,7 +43,7 @@ const APP_SECRET = process.env.SHOPEE_APP_SECRET || "";
 const OFFERS_PER_PUSH = Number(process.env.OFFERS_PER_PUSH || 10);
 const PUSH_INTERVAL_MINUTES = Number(process.env.PUSH_INTERVAL_MINUTES || 30);
 const DELAY_BETWEEN_OFFERS_MS = Number(process.env.DELAY_BETWEEN_OFFERS_MS || 3000);
-const PAGES_PER_RUN = Number(process.env.PAGES_PER_RUN || 20); // você pediu 20 páginas
+const PAGES_PER_RUN = Number(process.env.PAGES_PER_RUN || 30); // você pediu 30 páginas
 const HTTP_TIMEOUT_MS = Number(process.env.HTTP_TIMEOUT_MS || 30000); // 30s timeout
 
 // persistência de dedupe entre reinícios
