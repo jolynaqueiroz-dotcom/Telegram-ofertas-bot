@@ -263,7 +263,7 @@ function formatOfferMessagePlain(offer) {
   const coupon = offer.couponLink || offer.coupon_url || offer.coupon || offer.couponCode || null;
 
   let header = "";
-  if (isBF) header = "🔥 *OFERTA BLACK FRIDAY!* \n";
+  if (isBF) header = "🔥 *OFERTA DO DIA!* \n";
   else if (coupon) header = "🔥 *OFERTA RELÂMPAGO — COM CUPOM!* \n";
 
   let msg = `${header}🔥 *${offer.productName}*\nDe: ${offer.priceMax}\nPor: *${offer.priceMin}*`;
