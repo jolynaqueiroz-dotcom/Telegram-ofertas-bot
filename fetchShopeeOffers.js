@@ -18,13 +18,16 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 
+/* ================= CONFIG ================= */
+
 const PUSH_INTERVAL_MINUTES = 30;
 const OFFERS_PER_PUSH = 10;
-const SENT_FILE = path.resolve("./sent_offers.json");
+const DELAY_BETWEEN_OFFERS_MS = 3000;
 
+const SENT_FILE = path.resolve("./sent_offers.json");
 let sentOffers = new Set();
 
-/* ===================== KEYWORDS ===================== */
+/* ================= KEYWORDS ================= */
 
 const REQUIRED_KEYWORDS = [
   "sofá","cama","guarda roupa","mesa","rack","painel tv",
@@ -43,14 +46,13 @@ const REQUIRED_KEYWORDS = [
 
 const BLOCKED_KEYWORDS = [
   "adesivo","capinha","película","chaveiro",
-  "enfeite","decorativo","black friday",
-  "promoção","oferta"
+  "enfeite","decorativo","black friday"
 ];
 
-/* ===================== UTILS ===================== */
+/* ================= UTILS ================= */
 
 function sha256Hex(str) {
-  return crypto.createHash("sha256").update(str).digest("hex");
+  return crypto.createHash("sha256").update(str, "utf8").digest("hex");
 }
 
 function isValidProduct(name = "") {
@@ -61,10 +63,10 @@ function isValidProduct(name = "") {
 }
 
 function uniqueKey(offer) {
-  return `${offer.productName}::${offer.shopId}::${offer.priceMin}`;
+  return offer.offerLink; // chave única REAL
 }
 
-/* ===================== STORAGE ===================== */
+/* ================= STORAGE ================= */
 
 async function loadSentOffers() {
   try {
@@ -79,7 +81,7 @@ async function saveSentOffers() {
   await fs.writeFile(SENT_FILE, JSON.stringify([...sentOffers]));
 }
 
-/* ===================== SHOPEE ===================== */
+/* ================= SHOPEE ================= */
 
 async function fetchOffers(keyword, page = 1) {
   const payload = {
@@ -103,11 +105,11 @@ async function fetchOffers(keyword, page = 1) {
     Authorization: `SHA256 Credential=${APP_ID}, Timestamp=${timestamp}, Signature=${sign}`
   };
 
-  const res = await axios.post(SHOPEE_URL, payload, { headers });
+  const res = await axios.post(SHOPEE_URL, payload, { headers, timeout: 30000 });
   return res.data?.data?.productOfferV2?.nodes || [];
 }
 
-/* ===================== TELEGRAM ===================== */
+/* ================= TELEGRAM ================= */
 
 async function sendOffer(offer) {
   const msg = `🔥 *${offer.productName}*
@@ -121,13 +123,18 @@ Por: *${offer.priceMin}*
   });
 }
 
-/* ===================== MAIN LOGIC ===================== */
+/* ================= MAIN ================= */
 
 async function runBot() {
+  let sentThisRun = 0;
+
   for (const kw of REQUIRED_KEYWORDS) {
+    if (sentThisRun >= OFFERS_PER_PUSH) break;
+
     const offers = await fetchOffers(kw, 1);
 
     for (const offer of offers) {
+      if (sentThisRun >= OFFERS_PER_PUSH) break;
       if (!isValidProduct(offer.productName)) continue;
 
       const key = uniqueKey(offer);
@@ -136,15 +143,21 @@ async function runBot() {
       sentOffers.add(key);
       await saveSentOffers();
       await sendOffer(offer);
+
+      sentThisRun++;
+      await new Promise(r => setTimeout(r, DELAY_BETWEEN_OFFERS_MS));
     }
   }
+
+  console.log(`✅ Enviadas ${sentThisRun} ofertas neste ciclo`);
 }
 
-setInterval(runBot, PUSH_INTERVAL_MINUTES * 60 * 1000);
+/* ================= START ================= */
 
 await loadSentOffers();
 runBot();
+setInterval(runBot, PUSH_INTERVAL_MINUTES * 60 * 1000);
 
 app.listen(PORT, () => {
-  console.log("🔥 Bot Shopee rodando perfeitamente");
+  console.log("🔥 Bot Shopee rodando com controle total");
 });
