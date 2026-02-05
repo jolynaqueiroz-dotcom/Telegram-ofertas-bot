@@ -1,6 +1,12 @@
-const fs = require("fs");
-const path = require("path");
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
+// ===== resolve __dirname no ES Module =====
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// ===== arquivos =====
 const SENT_FILE = path.join(__dirname, "sent_offers.json");
 const NEW_FILE = path.join(__dirname, "new_offers.json");
 const OFFERS_SOURCE = path.join(__dirname, "offers_store.json");
@@ -23,8 +29,8 @@ const REQUIRED_KEYWORDS = [
   "lençol","edredom","cobertor","toalha","jogo de cama","travesseiro",
 
   // moda
-  "vestido","blusa","camisa","calça","short","bermuda","roupa feminina",
-  "roupa masculina","roupa infantil",
+  "vestido","blusa","camisa","calça","short","bermuda",
+  "roupa feminina","roupa masculina","roupa infantil",
 
   // calçados
   "tenis","tênis","sapato","sandalia","sandália","chinelo",
@@ -42,9 +48,9 @@ const REQUIRED_KEYWORDS = [
   "alimento","limpeza","higiene","supermercado"
 ];
 
-// ==========================================================
+// =========================================================
 
-// Garante sent_offers.json
+// garante sent_offers.json
 function ensureSentFile() {
   if (!fs.existsSync(SENT_FILE)) {
     fs.writeFileSync(SENT_FILE, JSON.stringify({ sent: [] }, null, 2));
@@ -60,7 +66,7 @@ function saveSentOffers(sent) {
   fs.writeFileSync(SENT_FILE, JSON.stringify({ sent }, null, 2));
 }
 
-// Normaliza texto
+// normaliza texto
 function normalize(text = "") {
   return text
     .toLowerCase()
@@ -69,13 +75,13 @@ function normalize(text = "") {
     .trim();
 }
 
-// Verifica keyword obrigatória
+// verifica keyword obrigatória
 function hasRequiredKeyword(name) {
   const n = normalize(name);
   return REQUIRED_KEYWORDS.some(k => n.includes(normalize(k)));
 }
 
-// Cria fingerprint REAL do produto
+// fingerprint real do produto
 function productFingerprint(offer) {
   const name = normalize(offer.productName || offer.name || "");
   const image = offer.imageUrl || "";
@@ -100,7 +106,7 @@ function run() {
   for (const offer of allOffers) {
     const name = offer.productName || offer.name || "";
 
-    // 🔒 FORÇA KEYWORDS
+    // 🔒 força keywords
     if (!hasRequiredKeyword(name)) continue;
 
     const fingerprint = productFingerprint(offer);
