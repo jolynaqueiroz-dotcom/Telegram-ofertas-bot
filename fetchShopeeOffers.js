@@ -5,22 +5,82 @@ const SENT_FILE = path.join(__dirname, "sent_offers.json");
 const NEW_FILE = path.join(__dirname, "new_offers.json");
 const OFFERS_SOURCE = path.join(__dirname, "offers_store.json");
 
-// Garante que o sent_offers.json existe
+// ================= KEYWORDS OBRIGATÓRIAS =================
+const REQUIRED_KEYWORDS = [
+  // móveis
+  "sofa","sofá","cama","guarda roupa","guarda-roupa","armario","armário",
+  "mesa","cadeira","estante","rack","painel","cristaleira",
+
+  // eletro / eletrônicos
+  "televisao","tv","ventilador","geladeira","fogao","fogão","microondas",
+  "micro-ondas","lavadora","maquina de lavar","air fryer","liquidificador",
+
+  // cozinha / mesa posta
+  "panela","jogo de panela","talher","jogo de talheres","prato","louça",
+  "mesa posta","organizadores","pote hermetico","pote hermético",
+
+  // cama mesa banho
+  "lençol","edredom","cobertor","toalha","jogo de cama","travesseiro",
+
+  // moda
+  "vestido","blusa","camisa","calça","short","bermuda","roupa feminina",
+  "roupa masculina","roupa infantil",
+
+  // calçados
+  "tenis","tênis","sapato","sandalia","sandália","chinelo",
+
+  // beleza
+  "perfume","perfumaria","maquiagem","batom","base","corretivo",
+
+  // bebê
+  "bebê","bebe","mala maternidade","enxoval","kit bebe","kit bebê",
+
+  // brinquedos / escolar
+  "brinquedo","material escolar","mochila","estojo","caderno",
+
+  // supermercado
+  "alimento","limpeza","higiene","supermercado"
+];
+
+// ==========================================================
+
+// Garante sent_offers.json
 function ensureSentFile() {
   if (!fs.existsSync(SENT_FILE)) {
     fs.writeFileSync(SENT_FILE, JSON.stringify({ sent: [] }, null, 2));
   }
 }
 
-// Carrega IDs já enviados
 function loadSentOffers() {
   ensureSentFile();
   return JSON.parse(fs.readFileSync(SENT_FILE)).sent;
 }
 
-// Salva novos IDs enviados
 function saveSentOffers(sent) {
   fs.writeFileSync(SENT_FILE, JSON.stringify({ sent }, null, 2));
+}
+
+// Normaliza texto
+function normalize(text = "") {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+// Verifica keyword obrigatória
+function hasRequiredKeyword(name) {
+  const n = normalize(name);
+  return REQUIRED_KEYWORDS.some(k => n.includes(normalize(k)));
+}
+
+// Cria fingerprint REAL do produto
+function productFingerprint(offer) {
+  const name = normalize(offer.productName || offer.name || "");
+  const image = offer.imageUrl || "";
+  const shop = offer.shopId || "";
+  return `${name}|${image}|${shop}`;
 }
 
 function run() {
@@ -33,29 +93,28 @@ function run() {
 
   const allOffers = JSON.parse(fs.readFileSync(OFFERS_SOURCE));
   const sentOffers = loadSentOffers();
+  const sentSet = new Set(sentOffers);
 
   const newOffers = [];
-  const updatedSent = new Set(sentOffers);
 
   for (const offer of allOffers) {
-    const offerId =
-      offer.itemid ||
-      offer.product_id ||
-      offer.id ||
-      offer.name;
+    const name = offer.productName || offer.name || "";
 
-    if (!offerId) continue;
+    // 🔒 FORÇA KEYWORDS
+    if (!hasRequiredKeyword(name)) continue;
 
-    if (!updatedSent.has(offerId)) {
-      newOffers.push(offer);
-      updatedSent.add(offerId);
-    }
+    const fingerprint = productFingerprint(offer);
+
+    if (sentSet.has(fingerprint)) continue;
+
+    newOffers.push(offer);
+    sentSet.add(fingerprint);
   }
 
   fs.writeFileSync(NEW_FILE, JSON.stringify(newOffers, null, 2));
-  saveSentOffers([...updatedSent]);
+  saveSentOffers([...sentSet]);
 
-  console.log(`✅ ${newOffers.length} ofertas novas salvas`);
+  console.log(`✅ ${newOffers.length} ofertas válidas salvas`);
 }
 
 run();
