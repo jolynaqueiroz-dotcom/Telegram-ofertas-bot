@@ -1,4 +1,5 @@
-// server.js (ESM) — Shopee + Telegram
+// server.js — BOT MULTI OFERTAS
+
 import express from "express";
 import axios from "axios";
 import crypto from "crypto";
@@ -6,205 +7,294 @@ import fs from "fs/promises";
 import path from "path";
 import TelegramBot from "node-telegram-bot-api";
 
-// ================== ENV ==================
+// ================= ENV =================
+
 const {
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID,
   SHOPEE_APP_ID,
   SHOPEE_APP_SECRET,
-  PORT = 3000,
+  ML_ACCESS_TOKEN,
+  PORT = 3000
 } = process.env;
 
-// ================== TELEGRAM ==================
+// ================= TELEGRAM =================
+
 const bot = TELEGRAM_BOT_TOKEN ? new TelegramBot(TELEGRAM_BOT_TOKEN) : null;
 
-// ================== APP ==================
+// ================= APP =================
+
 const app = express();
 app.use(express.json());
 
-// ================== SHOPEE ==================
-const SHOPEE_URL = "https://open-api.affiliate.shopee.com.br/graphql";
-const HTTP_TIMEOUT_MS = 30000;
+// ================= CONFIG =================
 
-// ================== ENVIO ==================
-const OFFERS_PER_PUSH = 10;
 const PUSH_INTERVAL_MINUTES = 30;
+const OFFERS_PER_PUSH = 10;
 const DELAY_BETWEEN_OFFERS_MS = 3000;
 
-// ================== DEDUPE ==================
-const SENT_FILE = path.resolve("./sent_offers.json");
+// ================= STORAGE =================
+
+const SENT_FILE = path.resolve("./sent_links.json");
 let sentSet = new Set();
 
 async function loadSent() {
   try {
-    const raw = await fs.readFile(SENT_FILE, "utf8");
-    const json = JSON.parse(raw || '{"sent": []}');
-    sentSet = new Set(json.sent || []);
+    const raw = await fs.readFile(SENT_FILE,"utf8");
+    sentSet = new Set(JSON.parse(raw));
   } catch {
-    await fs.writeFile(SENT_FILE, JSON.stringify({ sent: [] }, null, 2));
-    sentSet = new Set();
+    await fs.writeFile(SENT_FILE, JSON.stringify([]));
   }
 }
-async function saveSent() {
-  await fs.writeFile(SENT_FILE, JSON.stringify({ sent: [...sentSet] }, null, 2));
+
+async function saveSent(){
+  await fs.writeFile(SENT_FILE, JSON.stringify([...sentSet]));
 }
 
-// ================== KEYWORDS (FORÇADAS NO CÓDIGO) ==================
-// >>> SOMENTE o que você quer vender
-const REQUIRED_KEYWORDS = [
-  // Eletro / Eletrônicos
-  "televisão","tv","smart tv","geladeira","freezer","fogão","cooktop","forno","micro-ondas",
-  "ar condicionado","ventilador","climatizador","lavadora","máquina de lavar","secadora",
-  "notebook","computador","monitor","impressora","roteador","caixa de som","soundbar",
+// ================= UTILS =================
 
-  // Casa / Móveis
-  "sofá","cama","colchão","guarda-roupa","armário","rack","painel","mesa","cadeira","estante",
-  "criado-mudo","cômoda","poltrona","mesa de jantar","bancada",
+function sha256Hex(s){
+  return crypto.createHash("sha256").update(s).digest("hex");
+}
 
-  // Cozinha / Mesa posta
-  "panelas","jogo de panelas","talheres","faqueiro","louças","pratos","xícaras","canecas",
-  "potes herméticos","organizador de cozinha","escorredor","mesa posta","cristaleira",
+function delay(ms){
+  return new Promise(r=>setTimeout(r,ms));
+}
 
-  // Cama, Mesa e Banho
-  "jogo de cama","lençol","toalha","toalhas","edredom","cobertor","colcha","travesseiro",
+// ================= KEYWORDS =================
 
-  // Supermercado
-  "alimentos","bebidas","limpeza","higiene","mercado",
-
-  // Moda
-  "roupa feminina","roupa masculina","roupa infantil","vestido","calça","camisa","blusa",
-  "shorts","jaqueta","casaco","lingerie","cueca","sutiã","pijama","calçado","tênis","sapato",
-
-  // Beleza / Perfumaria
-  "perfume","perfumaria","maquiagem","skincare","cosméticos",
-
-  // Mamãe e Bebê / Infantil
-  "mamãe e bebê","enxoval","mala maternidade","fralda","carrinho","cadeira de alimentação",
-  "brinquedo","material escolar",
-
-  // Ferramentas
-  "ferramentas","furadeira","parafusadeira","serra","kit ferramentas"
+const KEYWORDS = [
+"smart tv",
+"notebook",
+"geladeira",
+"sofa",
+"tenis",
+"perfume",
+"maquiagem",
+"vestido",
+"panela",
+"ferramenta"
 ];
 
-// >>> BLOQUEIOS (lixo que você NÃO quer)
-const BLOCKED_KEYWORDS = [
-  "almofada","capinha","película","adesivo","chaveiro","enfeite","decorativo",
-  "black friday","black","case","capa","pelicula"
-];
+// ================= SHOPEE =================
 
-// ================== UTIL ==================
-const normalize = (s="") =>
-  s.toLowerCase()
-   .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
-   .replace(/[^a-z0-9\s]/g," ")
-   .replace(/\s+/g," ")
-   .trim();
+const SHOPEE_URL = "https://open-api.affiliate.shopee.com.br/graphql";
 
-const sha256Hex = (s) =>
-  crypto.createHash("sha256").update(s, "utf8").digest("hex");
+async function fetchShopee(keyword){
 
-function matchesRequired(name) {
-  const n = normalize(name);
-  return REQUIRED_KEYWORDS.some(k => n.includes(normalize(k)));
-}
-function matchesBlocked(name) {
-  const n = normalize(name);
-  return BLOCKED_KEYWORDS.some(k => n.includes(normalize(k)));
-}
-
-// ================== SHOPEE FETCH ==================
-function makePayload(keyword, page) {
-  return {
-    query:
-      "query productOfferV2($keyword:String,$limit:Int,$page:Int){productOfferV2(keyword:$keyword,limit:$limit,page:$page){nodes{productName imageUrl offerLink priceMin priceMax shopId videoUrl couponLink}}}",
-    variables: { keyword, limit: 30, page }
+  const payload = {
+    query:"query productOfferV2($keyword:String,$limit:Int,$page:Int){productOfferV2(keyword:$keyword,limit:$limit,page:$page){nodes{productName imageUrl offerLink priceMin priceMax}}}",
+    variables:{keyword,limit:20,page:1}
   };
-}
 
-async function fetchPage(keyword, page) {
-  const payload = makePayload(keyword, page);
   const payloadStr = JSON.stringify(payload);
+
   const timestamp = Math.floor(Date.now()/1000);
-  const sign = sha256Hex(`${SHOPEE_APP_ID}${timestamp}${payloadStr}${SHOPEE_APP_SECRET}`);
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `SHA256 Credential=${SHOPEE_APP_ID}, Timestamp=${timestamp}, Signature=${sign}`,
+
+  const sign = sha256Hex(
+    `${SHOPEE_APP_ID}${timestamp}${payloadStr}${SHOPEE_APP_SECRET}`
+  );
+
+  const headers={
+    "Content-Type":"application/json",
+    Authorization:`SHA256 Credential=${SHOPEE_APP_ID}, Timestamp=${timestamp}, Signature=${sign}`
   };
-  const resp = await axios.post(SHOPEE_URL, payload, { headers, timeout: HTTP_TIMEOUT_MS });
+
+  const resp = await axios.post(SHOPEE_URL,payload,{headers});
+
   return resp?.data?.data?.productOfferV2?.nodes || [];
 }
 
-async function fetchOffers() {
-  const collected = [];
-  for (const kw of REQUIRED_KEYWORDS) {
-    for (let p=1; p<=2; p++) {
-      try {
-        const nodes = await fetchPage(kw, p);
-        collected.push(...nodes);
-      } catch {}
+// ================= MERCADO LIVRE =================
+
+async function fetchMercadoLivre(keyword){
+
+  const url=`https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(keyword)}&limit=20`;
+
+  const resp=await axios.get(url,{
+    headers:{
+      Authorization:`Bearer ${ML_ACCESS_TOKEN}`
     }
+  });
+
+  return resp.data.results.map(p=>({
+
+    productName:p.title,
+    imageUrl:p.thumbnail,
+    offerLink:p.permalink,
+    priceMin:p.price,
+    priceMax:p.original_price || p.price,
+    source:"mercadolivre"
+
+  }));
+}
+
+// ================= SHEIN (placeholder) =================
+
+async function fetchShein(keyword){
+
+  return [
+    {
+      productName:`Produto Shein ${keyword}`,
+      imageUrl:null,
+      offerLink:`SEU_LINK_AFILIADO_SHEIN`,
+      priceMin:"--",
+      priceMax:"--",
+      source:"shein"
+    }
+  ];
+
+}
+
+// ================= MAGALU =================
+
+async function fetchMagalu(keyword){
+
+  return [
+    {
+      productName:`Produto Magalu ${keyword}`,
+      imageUrl:null,
+      offerLink:`SEU_LINK_AFILIADO_MAGALU`,
+      priceMin:"--",
+      priceMax:"--",
+      source:"magalu"
+    }
+  ];
+
+}
+
+// ================= C&A =================
+
+async function fetchCEA(keyword){
+
+  return [
+    {
+      productName:`Produto C&A ${keyword}`,
+      imageUrl:null,
+      offerLink:`SEU_LINK_AFILIADO_CEA`,
+      priceMin:"--",
+      priceMax:"--",
+      source:"cea"
+    }
+  ];
+
+}
+
+// ================= TELEGRAM =================
+
+function formatMsg(o){
+
+return `🔥 *OFERTA*
+
+*${o.productName}*
+
+💰 De: ${o.priceMax}
+🔥 Por: *${o.priceMin}*
+
+🛒 [Comprar aqui](${o.offerLink})
+`;
+
+}
+
+async function sendOffer(o){
+
+  const key = sha256Hex(o.offerLink);
+
+  if(sentSet.has(key)) return;
+
+  sentSet.add(key);
+  await saveSent();
+
+  const msg = formatMsg(o);
+
+  if(o.imageUrl){
+    await bot.sendPhoto(
+      TELEGRAM_CHAT_ID,
+      o.imageUrl,
+      {caption:msg,parse_mode:"Markdown"}
+    );
+  }else{
+    await bot.sendMessage(
+      TELEGRAM_CHAT_ID,
+      msg,
+      {parse_mode:"Markdown"}
+    );
   }
-  return collected;
+
 }
 
-// ================== FORMAT ==================
-function formatMsg(o) {
-  return `🔥 *OFERTA DO DIA!*\n🔥 *${o.productName}*\nDe: ${o.priceMax}\nPor: *${o.priceMin}*\n🛒 [Link da oferta](${o.offerLink})`;
-}
+// ================= CICLO =================
 
-// ================== PUSH ==================
-async function pushTelegram(offers) {
-  for (const o of offers) {
-    const key = normalize(o.productName);
-    if (sentSet.has(key)) continue;
+let platformIndex = 0;
 
-    sentSet.add(key);
-    await saveSent();
+const platforms = [
+"shopee",
+"mercadolivre",
+"shopee",
+"magalu",
+"shopee",
+"shein",
+"cea"
+];
 
-    const msg = formatMsg(o);
-    try {
-      if (bot) {
-        if (o.videoUrl) {
-          await bot.sendVideo(TELEGRAM_CHAT_ID, o.videoUrl, { caption: msg, parse_mode:"Markdown" });
-        } else if (o.imageUrl) {
-          await bot.sendPhoto(TELEGRAM_CHAT_ID, o.imageUrl, { caption: msg, parse_mode:"Markdown" });
-        } else {
-          await bot.sendMessage(TELEGRAM_CHAT_ID, msg, { parse_mode:"Markdown" });
-        }
-      }
-      await new Promise(r=>setTimeout(r, DELAY_BETWEEN_OFFERS_MS));
-    } catch {}
+async function cycle(){
+
+  const keyword = KEYWORDS[Math.floor(Math.random()*KEYWORDS.length)];
+
+  const platform = platforms[platformIndex];
+
+  platformIndex++;
+  if(platformIndex>=platforms.length) platformIndex=0;
+
+  let offers=[];
+
+  try{
+
+    if(platform==="shopee")
+      offers=await fetchShopee(keyword);
+
+    if(platform==="mercadolivre")
+      offers=await fetchMercadoLivre(keyword);
+
+    if(platform==="shein")
+      offers=await fetchShein(keyword);
+
+    if(platform==="magalu")
+      offers=await fetchMagalu(keyword);
+
+    if(platform==="cea")
+      offers=await fetchCEA(keyword);
+
+  }catch(e){
+    console.log("erro plataforma",platform);
   }
+
+  for(const o of offers.slice(0,OFFERS_PER_PUSH)){
+
+    try{
+      await sendOffer(o);
+      await delay(DELAY_BETWEEN_OFFERS_MS);
+    }catch{}
+
+  }
+
 }
 
-// ================== CICLO ==================
-async function cycle() {
-  const raw = await fetchOffers();
-  const filtered = raw.filter(o =>
-    o?.productName &&
-    matchesRequired(o.productName) &&
-    !matchesBlocked(o.productName)
+// ================= SERVER =================
+
+app.get("/",(_,res)=>res.send("bot rodando"));
+
+app.listen(PORT,"0.0.0.0",async()=>{
+
+  await loadSent();
+
+  await cycle();
+
+  setInterval(
+    cycle,
+    PUSH_INTERVAL_MINUTES*60*1000
   );
 
-  // dedupe local por nome
-  const map = new Map();
-  for (const o of filtered) {
-    const k = normalize(o.productName);
-    if (!map.has(k)) map.set(k, o);
-  }
+  console.log("BOT ONLINE");
 
-  const toSend = [...map.values()]
-    .filter(o => !sentSet.has(normalize(o.productName)))
-    .slice(0, OFFERS_PER_PUSH);
-
-  await pushTelegram(toSend);
-}
-
-// ================== SERVER ==================
-app.get("/", (_,res)=>res.send("ok"));
-app.listen(PORT, "0.0.0.0", async ()=>{
-  await loadSent();
-  await cycle();
-  setInterval(cycle, PUSH_INTERVAL_MINUTES*60*1000);
-  console.log(`Rodando na porta ${PORT}`);
 });
